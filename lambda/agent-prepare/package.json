@@ -1,0 +1,16 @@
+{
+  "name": "security-triage-agent-prepare",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^22.0.0",
+    "typescript": "~5.7.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-agent": "^3.0.0"
+  }
+}

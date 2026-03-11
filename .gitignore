@@ -1,0 +1,47 @@
+# ── Dependencies ──────────────────────────────────────────────────────────────
+node_modules/
+
+# ── Build output ───────────────────────────────────────────────────────────────
+dist/
+cdk.out/
+*.js.map
+*.d.ts
+
+# ── Environment / secrets — NEVER commit these ────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ── CDK ────────────────────────────────────────────────────────────────────────
+# cdk.context.json captures resolved account/region lookups — commit if you want
+# reproducible deploys, but exclude if you don't want account info in git
+cdk.context.json
+
+# ── Frontend build ─────────────────────────────────────────────────────────────
+frontend/dist/
+
+# ── Lambda build artefacts ─────────────────────────────────────────────────────
+lambda/*/dist/
+
+# ── Local notes — not for source control ──────────────────────────────────────
+TODO.md
+
+# ── OS / editor noise ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# ── Test / coverage ────────────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+
+# ── Logs ───────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*

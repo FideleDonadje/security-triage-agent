@@ -1,0 +1,22 @@
+{
+  "name": "security-triage-agent-tools",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^22.0.0",
+    "typescript": "~5.7.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-securityhub": "^3.0.0",
+    "@aws-sdk/client-guardduty": "^3.0.0",
+    "@aws-sdk/client-config-service": "^3.0.0",
+    "@aws-sdk/client-cloudtrail": "^3.0.0",
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0"
+  }
+}
