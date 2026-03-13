@@ -1,5 +1,13 @@
 # Security Triage Agent
 
+![Powered by Claude Sonnet](https://img.shields.io/badge/Powered%20by-Claude%20Sonnet-D97757)
+![AWS Bedrock AgentCore](https://img.shields.io/badge/AWS-Bedrock%20AgentCore-FF9900?logo=amazonaws&logoColor=white)
+![AWS Security Hub](https://img.shields.io/badge/AWS-Security%20Hub-FF9900?logo=amazonaws&logoColor=white)
+![IaC](https://img.shields.io/badge/IaC-AWS%20CDK-232F3E?logo=amazonaws&logoColor=white)
+![Frontend](https://img.shields.io/badge/Frontend-React%20%2B%20Vite-61DAFB?logo=react&logoColor=black)
+![TypeScript](https://img.shields.io/badge/Language-TypeScript-3178C6?logo=typescript&logoColor=white)
+![Status](https://img.shields.io/badge/Status-MVP%20in%20progress-yellow)
+
 An AI-powered AWS security operations agent built on Bedrock AgentCore and Claude Sonnet. Analysts chat with it in plain English to investigate Security Hub findings — the agent enriches them with GuardDuty, Config, and CloudTrail context, proposes specific remediation actions with rationale, and executes them only after explicit human approval.
 
 ---
