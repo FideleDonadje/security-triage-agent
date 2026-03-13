@@ -2,6 +2,7 @@ import {
   BedrockAgentRuntimeClient,
   InvokeAgentCommand,
 } from '@aws-sdk/client-bedrock-agent-runtime';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import type { AuthContext } from './auth';
 
@@ -10,9 +11,44 @@ interface ChatRequest {
   session_id?: string;
 }
 
-const bedrockClient = new BedrockAgentRuntimeClient({
-  region: process.env.REGION ?? process.env.AWS_REGION ?? 'us-east-1',
-});
+const REGION = process.env.REGION ?? process.env.AWS_REGION ?? 'us-east-1';
+
+const bedrockClient = new BedrockAgentRuntimeClient({ region: REGION });
+const ssmClient = new SSMClient({ region: REGION });
+
+// ── Agent config — resolved from SSM once per cold start, then cached ─────────
+
+let cachedAgentId: string | undefined;
+let cachedAgentAliasId: string | undefined;
+
+async function resolveAgentConfig(): Promise<{ agentId: string; agentAliasId: string }> {
+  if (cachedAgentId && cachedAgentAliasId) {
+    return { agentId: cachedAgentId, agentAliasId: cachedAgentAliasId };
+  }
+
+  const idParam    = process.env.AGENT_ID_PARAM;
+  const aliasParam = process.env.AGENT_ALIAS_ID_PARAM;
+
+  if (idParam && aliasParam) {
+    // Production path: IDs are stored in SSM by AgentStack after deploy
+    const [idResult, aliasResult] = await Promise.all([
+      ssmClient.send(new GetParameterCommand({ Name: idParam })),
+      ssmClient.send(new GetParameterCommand({ Name: aliasParam })),
+    ]);
+    cachedAgentId      = idResult.Parameter?.Value;
+    cachedAgentAliasId = aliasResult.Parameter?.Value;
+  } else {
+    // Local-dev / pre-agent-deploy fallback: direct env vars
+    cachedAgentId      = process.env.AGENT_ID;
+    cachedAgentAliasId = process.env.AGENT_ALIAS_ID;
+  }
+
+  if (!cachedAgentId || !cachedAgentAliasId) {
+    throw new Error('Agent not yet configured — deploy AgentStack first');
+  }
+
+  return { agentId: cachedAgentId, agentAliasId: cachedAgentAliasId };
+}
 
 /**
  * POST /chat
@@ -38,11 +74,13 @@ export async function handleChat(
     return err(400, '"message" is required');
   }
 
-  const agentId = process.env.AGENT_ID;
-  const agentAliasId = process.env.AGENT_ALIAS_ID;
-
-  if (!agentId || !agentAliasId) {
-    return err(503, 'Agent not yet configured - deploy AgentStack and set AGENT_ID / AGENT_ALIAS_ID');
+  let agentId: string;
+  let agentAliasId: string;
+  try {
+    ({ agentId, agentAliasId } = await resolveAgentConfig());
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return err(503, msg);
   }
 
   // Use session_id from client if provided; fall back to analyst's Cognito sub.

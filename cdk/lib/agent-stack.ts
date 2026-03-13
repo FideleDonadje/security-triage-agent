@@ -5,8 +5,13 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNode from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
+
+// Well-known SSM parameter names — read by the API Lambda at cold start
+export const SSM_AGENT_ID    = '/security-triage/agent-id';
+export const SSM_AGENT_ALIAS = '/security-triage/agent-alias-id';
 
 export interface AgentStackProps extends cdk.StackProps {
   /** ARN of the DynamoDB task table from SecurityTriageStack */
@@ -386,6 +391,21 @@ export class AgentStack extends cdk.Stack {
 
     this.agentId = agent.attrAgentId;
     this.agentAliasId = agentAlias.attrAgentAliasId;
+
+    // ── SSM Parameters — API Lambda reads these at cold start ──────────────
+    // Avoids circular stack dependency: SecurityTriageStack deploys first,
+    // then AgentStack writes the IDs here, and the Lambda picks them up at runtime.
+    new ssm.StringParameter(this, 'AgentIdParam', {
+      parameterName: SSM_AGENT_ID,
+      stringValue: agent.attrAgentId,
+      description: 'Bedrock Agent ID for the security-triage-agent',
+    });
+
+    new ssm.StringParameter(this, 'AgentAliasIdParam', {
+      parameterName: SSM_AGENT_ALIAS,
+      stringValue: agentAlias.attrAgentAliasId,
+      description: 'Bedrock Agent prod alias ID for the security-triage-agent',
+    });
 
     // ── Auto-prepare: prepare agent + create version + update alias on deploy ──
     const agentPrepareRole = new iam.Role(this, 'AgentPrepareRole', {

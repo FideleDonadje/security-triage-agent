@@ -10,7 +10,17 @@ import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
+import { SSM_AGENT_ID, SSM_AGENT_ALIAS } from './agent-stack';
 import { Construct } from 'constructs';
+
+export interface SecurityTriageStackProps extends cdk.StackProps {
+  /**
+   * CloudFront distribution URL (e.g. https://dXXXX.cloudfront.net).
+   * Used as the Cognito callback URL and API CORS allowed origin.
+   * Defaults to localhost only when omitted (local dev).
+   */
+  frontendUrl?: string;
+}
 
 export class SecurityTriageStack extends cdk.Stack {
   // Exported for sibling stacks
@@ -19,8 +29,17 @@ export class SecurityTriageStack extends cdk.Stack {
   public readonly taskTable: dynamodb.Table;
   public readonly api: apigateway.RestApi;
 
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+  constructor(scope: Construct, id: string, props?: SecurityTriageStackProps) {
     super(scope, id, props);
+
+    const frontendUrl = props?.frontendUrl;
+    // Callback URLs: always include localhost for dev; add CloudFront URL when known
+    const callbackUrls = ['http://localhost:5173/'];
+    const logoutUrls   = ['http://localhost:5173/'];
+    if (frontendUrl) {
+      callbackUrls.push(`${frontendUrl}/`);
+      logoutUrls.push(`${frontendUrl}/`);
+    }
 
     // ── Cognito User Pool ──────────────────────────────────────────────────
     this.userPool = new cognito.UserPool(this, 'AnalystPool', {
@@ -44,6 +63,11 @@ export class SecurityTriageStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    // Cognito hosted UI domain — format: https://security-triage-<account>.auth.<region>.amazoncognito.com
+    const userPoolDomain = this.userPool.addDomain('CognitoDomain', {
+      cognitoDomain: { domainPrefix: `security-triage-${this.account}` },
+    });
+
     this.userPoolClient = new cognito.UserPoolClient(this, 'AnalystPoolClient', {
       userPool: this.userPool,
       userPoolClientName: 'security-triage-spa',
@@ -56,7 +80,15 @@ export class SecurityTriageStack extends cdk.Stack {
       oAuth: {
         flows: { authorizationCodeGrant: true },
         scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL, cognito.OAuthScope.PROFILE],
+        callbackUrls,
+        logoutUrls,
       },
+    });
+
+    new cdk.CfnOutput(this, 'CognitoDomain', {
+      value: `https://${userPoolDomain.domainName}.auth.${this.region}.amazoncognito.com`,
+      description: 'Cognito hosted UI domain — use as VITE_COGNITO_DOMAIN in frontend .env',
+      exportName: 'SecurityTriageCognitoDomain',
     });
 
     // ── DynamoDB Task Table ────────────────────────────────────────────────
@@ -230,6 +262,17 @@ export class SecurityTriageStack extends cdk.Stack {
       ],
     }));
 
+    // SSM: read agent ID and alias ID written by AgentStack after deploy
+    apiLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SsmReadAgentConfig',
+      effect: iam.Effect.ALLOW,
+      actions: ['ssm:GetParameter'],
+      resources: [
+        `arn:aws:ssm:${this.region}:${this.account}:parameter${SSM_AGENT_ID}`,
+        `arn:aws:ssm:${this.region}:${this.account}:parameter${SSM_AGENT_ALIAS}`,
+      ],
+    }));
+
     // ── Lambda: API Layer (NodejsFunction — esbuild bundles TS) ───────────
     const apiLambda = new lambdaNode.NodejsFunction(this, 'ApiLambda', {
       functionName: 'security-triage-api',
@@ -252,7 +295,11 @@ export class SecurityTriageStack extends cdk.Stack {
         USER_POOL_ID: this.userPool.userPoolId,
         USER_POOL_CLIENT_ID: this.userPoolClient.userPoolClientId,
         REGION: this.region,
-        // AGENT_ID and AGENT_ALIAS_ID set after AgentCore deploy
+        // Agent IDs are written to SSM by AgentStack and read at Lambda cold start
+        AGENT_ID_PARAM: SSM_AGENT_ID,
+        AGENT_ALIAS_ID_PARAM: SSM_AGENT_ALIAS,
+        // CORS: restrict to CloudFront URL; falls back to * for local dev
+        ALLOWED_ORIGIN: frontendUrl ?? '*',
       },
     });
 

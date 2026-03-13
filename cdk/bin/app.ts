@@ -12,13 +12,23 @@ const env: cdk.Environment = {
   region: process.env.CDK_DEFAULT_REGION ?? 'us-east-1',
 };
 
-// Core stack: Cognito, DynamoDB, API GW, Lambdas, WAF
+// 1. Frontend first — we need the CloudFront URL to wire into Cognito + CORS
+const frontendStack = new FrontendStack(app, 'SecurityTriageFrontendStack', {
+  env,
+  description: 'Security Triage Agent — React frontend on S3 + CloudFront',
+});
+
+const frontendUrl = `https://${frontendStack.distribution.distributionDomainName}`;
+
+// 2. Core stack — receives the CloudFront URL for Cognito callback URLs + CORS
 const mainStack = new SecurityTriageStack(app, 'SecurityTriageStack', {
   env,
   description: 'Security Triage Agent — core resources (Cognito, DynamoDB, Lambdas, API GW, WAF)',
+  frontendUrl,
 });
+mainStack.addDependency(frontendStack);
 
-// Agent: Bedrock Agent with 6 tools + action group Lambda
+// 3. Agent — Bedrock Agent writes its IDs to SSM; API Lambda reads them at cold start
 const agentStack = new AgentStack(app, 'SecurityTriageAgentStack', {
   env,
   description: 'Security Triage Agent — Bedrock Agent, action group Lambda, IAM',
@@ -27,12 +37,6 @@ const agentStack = new AgentStack(app, 'SecurityTriageAgentStack', {
   statusIndexName: 'status-index',
 });
 agentStack.addDependency(mainStack);
-
-// Frontend: S3 + CloudFront
-new FrontendStack(app, 'SecurityTriageFrontendStack', {
-  env,
-  description: 'Security Triage Agent — React frontend on S3 + CloudFront',
-});
 
 // ── Cost allocation + tracking tags on every resource ─────────────────────────
 cdk.Tags.of(app).add('project',     'security-triage-agent');

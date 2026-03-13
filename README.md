@@ -1,37 +1,119 @@
 # Security Triage Agent
 
-An AI-powered AWS security operations agent. Analysts chat with it to investigate Security Hub findings. The agent enriches findings with GuardDuty, Config, and CloudTrail context, surfaces proposed remediation tasks, and executes safe actions after human approval.
+An AI-powered AWS security operations agent built on Bedrock AgentCore and Claude Sonnet. Analysts chat with it in plain English to investigate Security Hub findings — the agent enriches them with GuardDuty, Config, and CloudTrail context, proposes specific remediation actions with rationale, and executes them only after explicit human approval.
 
 ---
 
-## How it works
+## The problem
 
-```
-Analyst (browser)
-    │
-    │  HTTPS + Cognito JWT
-    ▼
-API Gateway  ──WAF──►  Node.js Lambda  ──►  Bedrock AgentCore (Claude Sonnet)
-                              │                        │
-                              │                        │  read-only
-                              │                        ├──► Security Hub
-                              │                        ├──► GuardDuty
-                              │                        ├──► Config
-                              │                        └──► CloudTrail
-                              │
-                              │  DynamoDB stream (status = APPROVED)
-                              ▼
-                       Execution Lambda
-                              │
-                              ├──► S3 PutBucketLogging
-                              └──► S3 PutEncryptionConfiguration
+Enterprise AWS environments typically run dozens to hundreds of accounts. Security Hub aggregates findings from all of them into a central security account — which means a single analyst can be looking at thousands of active findings across Security Hub, GuardDuty, Config, and CloudTrail at once.
+
+You can enable email or SNS notifications, but that just moves the problem: you get hundreds of alerts a day, most of them noise, and the signal-to-noise ratio degrades until analysts start ignoring them. What you actually need is triage — understanding which findings matter, why, and what to do about them.
+
+That triage currently looks like this:
+- Open Security Hub, find a critical finding
+- Cross-reference GuardDuty to see if there's active threat activity on that resource
+- Check Config to understand the compliance history — was this always misconfigured, or did something change?
+- Search CloudTrail to find who made the change and when
+- Decide whether to act, and if so, execute the change manually — hoping you got the right resource ARN and didn't miss a dependency
+
+Each finding can take 15–30 minutes to triage properly. Most don't get that attention. They sit in the queue, the finding count climbs, and the security posture silently degrades.
+
+## The solution
+
+This agent gives security professionals a conversational interface to their AWS security posture. Instead of context-switching across four consoles, an analyst types a question and gets a synthesised answer backed by live data from all four sources.
+
+**Day-to-day it looks like this:**
+
+- *"What's the most critical finding in the payments account right now?"* → agent pulls Security Hub, checks GuardDuty for correlated threat activity, and returns a plain-English summary with severity context.
+- *"Was that S3 bucket always public, or did something change recently?"* → agent queries Config history and CloudTrail to reconstruct what happened and who did it.
+- *"Queue a fix for all unencrypted buckets in the data-lake account."* → agent identifies the non-compliant resources, proposes individual remediation tasks with rationale, and surfaces them in the approval queue.
+- *"What have you queued this week?"* → agent returns a summary of pending, approved, and executed tasks across all findings.
+
+The analyst stays in control. The agent never touches AWS resources — it only proposes. A separate, narrowly-scoped Execution Lambda carries out approved actions, tagging every resource it touches for the audit trail.
+
+In a multi-account environment, Security Hub's aggregated view means the agent works across all member accounts from a single deployment in the delegated administrator account — no per-account setup required.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph browser[" Browser "]
+        UI["React SPA\nChat · Task Queue"]
+    end
+
+    subgraph auth[" Auth "]
+        Cognito["Amazon Cognito\nPKCE flow"]
+    end
+
+    subgraph hosting[" Frontend Hosting "]
+        CF["CloudFront + S3"]
+    end
+
+    subgraph apilayer[" API Layer "]
+        WAF["WAF\nOWASP rules · rate limit"]
+        APIGW["API Gateway"]
+        NodeLambda["Node.js Lambda\nJWT validation"]
+        WAF --> APIGW --> NodeLambda
+    end
+
+    subgraph agentlayer[" Agent "]
+        AgentCore["Bedrock AgentCore\nClaude Sonnet"]
+    end
+
+    subgraph sources[" Security Data — read-only "]
+        SH["Security Hub"]
+        GD["GuardDuty"]
+        CT["CloudTrail"]
+        Cfg["Config"]
+    end
+
+    subgraph datalayer[" Data "]
+        DDB[("DynamoDB\ntask queue")]
+        SSM["SSM Parameter Store\nagent ID wiring"]
+    end
+
+    subgraph executionlayer[" Execution — separate IAM role "]
+        ExecLambda["Execution Lambda"]
+        S3["S3\nPutBucketLogging\nPutEncryptionConfiguration"]
+        ExecLambda -->|"tags every resource touched"| S3
+    end
+
+    CW["CloudWatch\n90-day audit trail"]
+
+    UI <-->|"PKCE auth"| Cognito
+    UI -->|"HTTPS"| CF --> WAF
+
+    NodeLambda -->|"task CRUD"| DDB
+    NodeLambda -->|"chat proxy"| AgentCore
+
+    AgentCore -->|"read-only"| SH & GD & CT & Cfg
+    AgentCore -->|"queue_task · agent's only write"| DDB
+
+    DDB -->|"stream · status = APPROVED"| ExecLambda
+
+    NodeLambda & AgentCore & ExecLambda --> CW
+    AgentCore -.->|"reads agent ID at cold start"| SSM
 ```
 
-1. Analyst opens the chat UI — the agent automatically fetches the latest Security Hub findings.
-2. The agent investigates, enriches with threat context, and proposes remediation tasks.
-3. Proposed tasks appear in the Task Queue panel with a rationale.
-4. Analyst approves or rejects each task.
-5. Approved tasks trigger the Execution Lambda via DynamoDB streams — the only component that writes to AWS resources.
+**Key design constraints:**
+- The agent IAM role has **zero write access** to AWS services. Its only write action is `DynamoDB PutItem`.
+- The Execution Lambda runs under a **separate, narrowly-scoped IAM role** — it cannot be invoked directly, only via a DynamoDB stream event where `status = APPROVED`.
+- Every S3 action tags the resource with `security-agent-action: true` and an execution timestamp.
+- No AWS credentials ever reach the browser — all traffic is proxied through the API Lambda.
+
+---
+
+## Analyst workflow
+
+1. Analyst opens the chat UI — the agent automatically fetches the latest Security Hub findings and summarises the most critical one.
+2. Analyst asks follow-up questions in plain English: *"What's the blast radius of that finding?"*, *"Queue a fix for the unencrypted buckets."*
+3. The agent enriches findings with GuardDuty threat context, Config compliance history, and CloudTrail events, then proposes a remediation task with rationale.
+4. The proposed task appears in the Task Queue panel — action, resource ARN, and plain-English rationale visible.
+5. Analyst clicks **Approve** or **Reject**.
+6. On approval, the DynamoDB stream triggers the Execution Lambda — the change is made, the task updates to `EXECUTED`.
 
 ---
 
@@ -39,9 +121,9 @@ API Gateway  ──WAF──►  Node.js Lambda  ──►  Bedrock AgentCore (C
 
 **In scope**
 - Single analyst workflow
-- Chat UI + Task Queue panel
+- Chat UI + Task Queue panel (two-panel layout)
 - Agent investigates Security Hub findings on demand
-- GuardDuty and CloudTrail enrichment
+- GuardDuty, Config, and CloudTrail enrichment
 - Two autonomous actions: enable S3 access logging, enable S3 default encryption
 
 **Out of scope (post-MVP)**
@@ -109,193 +191,142 @@ API Gateway  ──WAF──►  Node.js Lambda  ──►  Bedrock AgentCore (C
 
 ## Prerequisites
 
-- AWS CLI v2 configured (`aws configure`) with admin permissions
+Two things that require manual action before deploying (AWS account-level gates — no API to automate):
+
+1. **Bedrock model access** — enable **Claude Sonnet 4.5** (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`)
+   in the [Bedrock Model Access console](https://console.aws.amazon.com/bedrock/home#/modelaccess).
+2. **AWS Security Hub** — enable it in the target region if not already active.
+
+Everything else is handled by the deploy script.
+
+Tools required on your machine:
+- AWS CLI v2 (`aws configure` with admin permissions)
 - Node.js 22+
 - AWS CDK CLI: `npm install -g aws-cdk`
-- CDK bootstrapped in the target account/region:
-  ```bash
-  cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
-  ```
-- Bedrock model access enabled for **Claude Sonnet 4.5** (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`)
-  in the target region. Enable it in the [Bedrock Model Access console](https://console.aws.amazon.com/bedrock/home#/modelaccess).
-- AWS Security Hub enabled in the target region.
+- **Git Bash** (Windows) — all scripts (`deploy.sh`, `deploy-frontend.sh`, `destroy.sh`) are bash scripts.
+  Run them from Git Bash or with `bash ./deploy.sh ...` — they will not work in PowerShell directly.
 
 ---
 
 ## First-time deployment
 
-### 1. Set environment variables
+### Step 1 — Deploy infrastructure
+
+Run from **Git Bash** (not PowerShell):
 
 ```bash
-export CDK_DEFAULT_ACCOUNT=123456789012   # your AWS account ID
-export CDK_DEFAULT_REGION=us-east-1       # target region
-export OWNER_EMAIL=you@example.com        # used for cost-allocation tags
+bash ./deploy.sh --profile myprofile --region us-east-1 --owner you@example.com
 ```
 
-### 2. Install dependencies and build CDK
+This single script handles everything:
+- Installs and builds all CDK and Lambda packages
+- Bootstraps CDK in the target account/region (safe to re-run)
+- Deploys all three stacks in the correct order
+- Saves all CDK outputs to `cdk-outputs.json`
+- Prints the two remaining manual commands with the correct IDs filled in
 
+> **What CDK wires automatically:**
+> - Cognito hosted UI domain (`security-triage-<account>.auth.<region>.amazoncognito.com`)
+> - Cognito callback URLs (CloudFront + localhost for local dev)
+> - `ALLOWED_ORIGIN` on the API Lambda (set to the CloudFront URL)
+> - Bedrock Agent ID and alias ID written to SSM — API Lambda reads them at cold start
+
+### Step 2 — Run the two commands printed by the script
+
+The script prints these with the correct IDs filled in from `cdk-outputs.json`:
+
+**a) Create the analyst account:**
 ```bash
-cd cdk && npm install && npm run build
-cd ..
-```
-
-### 3. Install and build Lambda packages
-
-```bash
-cd lambda/api      && npm install && npm run build && cd ../..
-cd lambda/execution && npm install && npm run build && cd ../..
-cd lambda/agent-tools && npm install && npm run build && cd ../..
-cd lambda/agent-prepare && npm install && npm run build && cd ../..
-```
-
-### 4. Deploy infrastructure stacks
-
-```bash
-cd cdk
-
-# Deploy core infrastructure (Cognito, DynamoDB, API GW, WAF, Lambdas)
-cdk deploy SecurityTriageStack
-
-# Deploy Bedrock AgentCore IAM role
-cdk deploy AgentStack
-
-# Deploy CloudFront + S3 frontend hosting
-cdk deploy SecurityTriageFrontendStack
-```
-
-Note the CDK outputs — you will need them in the next steps.
-
-### 5. Create the Bedrock Agent (one-time, in console)
-
-CDK provisions the IAM role and tooling but the Bedrock Agent itself must be created
-once in the console to obtain an Agent ID:
-
-1. Open **Bedrock → Agents → Create Agent**
-2. Name: `security-triage-agent`
-3. IAM role: select `security-triage-agentcore` (created by AgentStack)
-4. Model: `us.anthropic.claude-sonnet-4-5-20250929-v1:0`
-5. Instructions: copy the agent instructions from `cdk/lib/agent-stack.ts` (`AGENT_INSTRUCTIONS` constant)
-6. Add an **Action Group**:
-   - Name: `SecurityTools`
-   - Lambda: `security-triage-agent-tools`
-   - Schema: select the OpenAPI schema from `cdk/lib/` or paste manually
-7. Click **Save and prepare**
-8. Create an alias named `prod` — note the **Agent ID** and **Alias ID**
-
-### 6. Wire Agent ID back to the API Lambda
-
-```bash
-aws lambda update-function-configuration \
-  --function-name security-triage-api \
-  --environment "Variables={
-    AGENT_ID=<your-agent-id>,
-    AGENT_ALIAS_ID=<your-alias-id>,
-    ALLOWED_ORIGIN=https://<your-cloudfront-domain>
-  }"
-```
-
-Or set these in `cdk/lib/security-triage-stack.ts` and redeploy:
-
-```typescript
-environment: {
-  AGENT_ID: 'XXXXXXXXXX',
-  AGENT_ALIAS_ID: 'YYYYYYYYYY',
-  ALLOWED_ORIGIN: 'https://dXXXXXX.cloudfront.net',
-},
-```
-
-### 7. Create the first analyst account
-
-```bash
-# Replace values with your Cognito User Pool ID and desired email
 aws cognito-idp admin-create-user \
-  --user-pool-id us-east-1_XXXXXXXXX \
+  --user-pool-id <from script output> \
   --username analyst@example.com \
   --user-attributes Name=email,Value=analyst@example.com Name=email_verified,Value=true \
   --temporary-password "Temp1234!" \
   --message-action SUPPRESS
 ```
 
-### 8. Publish Cognito Managed Login branding
-
-The login page will show "unavailable" until branding is published:
-
+**b) Publish Cognito login branding** (one-time — without this the login page shows "unavailable"):
 ```bash
 aws cognito-idp create-managed-login-branding \
-  --user-pool-id us-east-1_XXXXXXXXX \
-  --client-id <your-app-client-id> \
+  --user-pool-id <from script output> \
+  --client-id <from script output> \
   --use-cognito-provided-values
 ```
 
-### 9. Configure the frontend
+### Step 3 — Configure the frontend
 
 ```bash
 cp frontend/.env.example frontend/.env.local
 ```
 
-Edit `frontend/.env.local`:
+Fill in `frontend/.env.local` — all values come from `cdk-outputs.json`:
 
 ```
-VITE_API_URL=https://<api-gateway-id>.execute-api.us-east-1.amazonaws.com/prod
-VITE_USER_POOL_ID=us-east-1_XXXXXXXXX
-VITE_USER_POOL_CLIENT_ID=<app-client-id>
-VITE_COGNITO_DOMAIN=https://<cognito-domain>.auth.us-east-1.amazoncognito.com
-VITE_REDIRECT_URI=https://<cloudfront-domain>/
+VITE_API_URL=<ApiUrl>
+VITE_USER_POOL_ID=<UserPoolId>
+VITE_USER_POOL_CLIENT_ID=<UserPoolClientId>
+VITE_COGNITO_DOMAIN=<CognitoDomain>
+VITE_REDIRECT_URI=<DistributionUrl>/
 ```
 
-### 10. Build and deploy the frontend
+### Step 4 — Deploy the frontend
 
 ```bash
-cd frontend && npm install && npm run build
-
-aws s3 sync dist/ s3://security-triage-frontend-<account>-<region>/ --delete
-
-# Invalidate CloudFront cache
-aws cloudfront create-invalidation \
-  --distribution-id <distribution-id> \
-  --paths "/*"
+bash ./deploy-frontend.sh --profile myprofile
 ```
+
+Builds the React app, syncs to S3, and invalidates the CloudFront cache.
 
 ---
 
 ## Redeployment (subsequent changes)
 
+**Infrastructure changes:**
 ```bash
-cd cdk && cdk deploy --all
+bash ./deploy.sh --profile myprofile --region us-east-1 --owner you@example.com
 ```
 
-For Lambda code changes only (faster than full CDK deploy):
-
+**Frontend changes only:**
 ```bash
-cd lambda/api && npm run build
-cd ../../cdk && cdk deploy SecurityTriageStack
+bash ./deploy-frontend.sh --profile myprofile
 ```
 
-For frontend changes only:
+---
+
+## Teardown (dev/test only)
+
+Run from **Git Bash** (not PowerShell):
 
 ```bash
-cd frontend && npm run build
-aws s3 sync dist/ s3://security-triage-frontend-<account>-<region>/ --delete
-aws cloudfront create-invalidation --distribution-id <id> --paths "/*"
+bash ./destroy.sh --profile myprofile --region us-east-1
 ```
+
+The script will ask you to type `yes` to confirm, then:
+1. Runs `cdk destroy --all` to remove all CloudFormation stacks
+2. Deletes the four resources that have `RemovalPolicy: RETAIN` (DynamoDB table, Cognito User Pool, both S3 buckets)
+3. Deletes the SSM parameters written by AgentStack
+4. Cleans up local build artefacts (`cdk-outputs.json`, `cdk/cdk.out`)
+
+> **Cognito domain propagation delay:** After destroy, wait ~2 minutes before running `./deploy.sh` again. Cognito domain prefix deletions take a moment to propagate globally — if `deploy.sh` fails with a domain conflict, just wait and re-run.
 
 ---
 
 ## Resources with RETAIN policy
 
-The following resources are **not deleted** when a stack is torn down — remove them
-manually if needed:
+The following resources survive `cdk destroy` to protect against accidental data loss.
+`destroy.sh` handles their cleanup automatically. If you need to clean them up manually:
 
-| Resource | Name | Stack |
+| Resource | Name | How to delete |
 |---|---|---|
-| DynamoDB table | `security-triage-tasks` | SecurityTriageStack |
-| Cognito User Pool | `security-triage-analysts` | SecurityTriageStack |
-| S3 frontend bucket | `security-triage-frontend-{account}-{region}` | SecurityTriageFrontendStack |
+| DynamoDB table | `security-triage-tasks` | `aws dynamodb delete-table --table-name security-triage-tasks` |
+| Cognito User Pool | `security-triage-analysts` | Console or `aws cognito-idp delete-user-pool --user-pool-id <id>` |
+| S3 frontend bucket | `security-triage-frontend-{account}-{region}` | Empty then delete via console or CLI |
+| S3 access logs bucket | `security-triage-access-logs-{account}-{region}` | Empty then delete via console or CLI |
 
-If a failed deploy rolls back and leaves these resources, re-adopt them with:
+If a **failed deploy** rolls back and leaves these resources, re-adopt them without data loss:
 
 ```bash
-cdk import SecurityTriageStack
+cd cdk && cdk import SecurityTriageStack
 ```
 
 ---
@@ -360,19 +391,19 @@ aws cognito-idp describe-user-pool-client \
 
 ### Agent returns "Agent not yet configured" (503)
 
-`AGENT_ID` or `AGENT_ALIAS_ID` environment variables are not set on the API Lambda.
-Set them via the console or CDK (see step 6 above).
+AgentStack has not finished deploying yet, so the SSM parameters
+(`/security-triage/agent-id`, `/security-triage/agent-alias-id`) do not exist.
+Run `cdk deploy --all` and wait for AgentStack to complete, then retry.
 
 ### Agent returns stale responses (old model, old instructions)
 
-The Bedrock Agent prod alias is pointing to an old version snapshot instead of
-DRAFT. Fix:
+The Bedrock Agent prod alias is pointing to an old version snapshot instead of DRAFT.
+CDK configures the alias to point to DRAFT by default, so this should only happen if
+the alias was manually changed. Fix:
 
 1. Open **Bedrock → Agents → security-triage-agent → Aliases → prod**
-2. Edit the alias — select "Create a new version and update alias" or switch to DRAFT
+2. Edit the alias — switch routing to DRAFT
 3. Save
-
-Future deploys avoid this by keeping the alias pointed at DRAFT (configured in `agent-stack.ts`).
 
 ### "Access denied" calling Bedrock
 
@@ -412,12 +443,13 @@ The Execution Lambda is triggered by the DynamoDB stream. Check:
 
 ### CORS errors in the browser
 
-`ALLOWED_ORIGIN` on the API Lambda does not match your CloudFront domain. Update it:
+`ALLOWED_ORIGIN` is set automatically by CDK to the CloudFront URL. If you are seeing
+CORS errors, check that SecurityTriageStack was deployed **after** FrontendStack
+(which happens automatically with `cdk deploy --all`). If stacks were deployed
+individually out of order, redeploy SecurityTriageStack:
 
 ```bash
-aws lambda update-function-configuration \
-  --function-name security-triage-api \
-  --environment "Variables={...,ALLOWED_ORIGIN=https://<your-cloudfront-domain>}"
+cd cdk && cdk deploy SecurityTriageStack
 ```
 
 ---
