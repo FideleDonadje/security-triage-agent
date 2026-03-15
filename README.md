@@ -44,6 +44,26 @@ In a multi-account environment, Security Hub's aggregated view means the agent w
 
 ---
 
+## Screenshots
+
+**Agent introduction — what it is and what it can do:**
+
+![Agent capabilities](docs/screenshots/capabilities.png)
+
+**Findings scan — 94 issues triaged by severity with remediation plan:**
+
+![Findings summary](docs/screenshots/findings-summary.png)
+
+**Task queue — 22 remediations awaiting analyst approval:**
+
+![Task queue with pending approvals](docs/screenshots/task-queue.png)
+
+**Remediation summary — 24 tasks queued across S3 logging and resource tagging:**
+
+![Remediation summary](docs/screenshots/remediation-summary.png)
+
+---
+
 ## Architecture
 
 ```mermaid
