@@ -24,8 +24,8 @@ export class FrontendStack extends cdk.Stack {
 
     // ── S3 Bucket (private — CloudFront-only access) ───────────────────────
     this.frontendBucket = new s3.Bucket(this, 'FrontendBucket', {
-      // Account/region suffix prevents global naming conflicts
-      bucketName: `security-triage-frontend-${this.account}-${this.region}`,
+      // No explicit bucketName — CDK generates a hash-based name.
+      // Avoids embedding the AWS account ID in a publicly visible bucket name.
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,

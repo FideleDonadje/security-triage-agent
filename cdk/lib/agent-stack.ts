@@ -9,9 +9,11 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 
-// Well-known SSM parameter names — read by the API Lambda at cold start
-export const SSM_AGENT_ID    = '/security-triage/agent-id';
-export const SSM_AGENT_ALIAS = '/security-triage/agent-alias-id';
+// Well-known SSM parameter names
+export const SSM_AGENT_ID           = '/security-triage/agent-id';
+export const SSM_AGENT_ALIAS        = '/security-triage/agent-alias-id';
+// Required tag keys — configurable post-deploy without redeployment
+export const SSM_REQUIRED_TAG_KEYS  = '/security-triage/required-tag-keys';
 
 export interface AgentStackProps extends cdk.StackProps {
   /** ARN of the DynamoDB task table from SecurityTriageStack */
@@ -33,22 +35,28 @@ CAPABILITIES:
 - get_threat_context: Look up GuardDuty threat findings for a specific resource
 - get_config_status: Check AWS Config compliance status for a resource
 - get_trail_events: Review recent CloudTrail API activity for a resource or event type
-- queue_task: Queue a remediation task for analyst approval (your ONLY write action)
+- get_tag_compliance: Find resources missing required tags (Environment, Owner, Project). Returns existing tags so you can infer the correct values from patterns.
+- get_enabled_standards: List active Security Hub compliance standards in this account.
+- get_compliance_report: Generate a posture report for a standard (NIST 800-53, CIS, FSBP, PCI DSS). Shows control counts, failing findings, and top failing control families.
+- queue_task: Queue a remediation task for analyst approval
+- cancel_task: Cancel a PENDING task you previously queued (if it was queued in error)
 - get_task_queue: View pending, approved, or rejected remediation tasks
 
 RULES — never violate these:
-1. You are READ-ONLY for all AWS services. Your only write action is queue_task.
-2. Only queue tasks for these two actions: enable_s3_logging, enable_s3_encryption
+1. You are READ-ONLY for all AWS services. Your only write actions are queue_task and cancel_task.
+2. Only queue tasks for these two actions: enable_s3_logging, tag_resource
 3. Always explain your reasoning and cite the finding_id before queuing a task
 4. Never claim an action has been taken — tasks must be approved by the analyst first
 5. When asked about risky actions outside your scope, explain they are out of scope for MVP
+6. For tag_resource tasks: infer tag values from the resource name, existing tags on sibling resources, and account context. Propose specific values in action_params — never leave them empty.
 
 WORKFLOW:
-1. When the analyst opens chat, proactively fetch Critical and High findings
-2. Summarize the most critical finding first, with resource ARN and why it matters
-3. For each finding, offer to enrich with GuardDuty, Config, or CloudTrail context
-4. When recommending a remediation, explain the risk, then queue the task
-5. After queuing, tell the analyst to review and approve in the Task Queue panel
+1. When the analyst opens chat, greet them with a brief introduction: what you are, what you can investigate (Security Hub findings, GuardDuty threats, Config compliance, CloudTrail events, tag compliance), and what actions you can queue for approval (enable S3 logging, tag resources). Keep it to 3-4 lines. Do NOT call any tools on greeting.
+2. Wait for the analyst to ask before fetching findings or running any tool.
+3. When asked to investigate, summarize findings clearly: severity, resource, and why it matters.
+4. For each finding, offer to enrich with GuardDuty, Config, or CloudTrail context.
+5. When recommending a remediation, explain the risk, then queue the task.
+6. After queuing, tell the analyst to review and approve in the Task Queue panel.
 
 COMMUNICATION STYLE:
 - Be concise and action-oriented — this is a security operations context
@@ -144,7 +152,7 @@ export class AgentStack extends cdk.Stack {
       ],
     });
 
-    // Security Hub: read-only (get_findings)
+    // Security Hub: read-only (get_findings, get_enabled_standards, get_compliance_report)
     agentToolsLambdaRole.addToPolicy(
       new iam.PolicyStatement({
         sid: 'SecurityHubReadOnly',
@@ -152,6 +160,9 @@ export class AgentStack extends cdk.Stack {
         actions: [
           'securityhub:GetFindings',
           'securityhub:ListFindings',
+          'securityhub:GetEnabledStandards',
+          'securityhub:DescribeStandards',
+          'securityhub:DescribeStandardsControls',
         ],
         resources: ['*'],
       }),
@@ -194,15 +205,16 @@ export class AgentStack extends cdk.Stack {
       }),
     );
 
-    // DynamoDB: queue_task (PutItem) + get_task_queue (Query) — agent's ONLY write
+    // DynamoDB: queue_task (PutItem), cancel_task (UpdateItem), read tools (Query, GetItem)
     agentToolsLambdaRole.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'DynamoDBQueueTaskOnly',
+        sid: 'DynamoDBAgentWriteAndRead',
         effect: iam.Effect.ALLOW,
         actions: [
-          'dynamodb:PutItem',   // queue_task
-          'dynamodb:Query',     // get_task_queue
-          'dynamodb:GetItem',   // read individual task
+          'dynamodb:PutItem',    // queue_task
+          'dynamodb:UpdateItem', // cancel_task (PENDING → CANCELLED only, enforced in code)
+          'dynamodb:Query',      // get_task_queue
+          'dynamodb:GetItem',    // read individual task
         ],
         resources: [
           props.taskTableArn,
@@ -211,12 +223,34 @@ export class AgentStack extends cdk.Stack {
       }),
     );
 
-    // Explicit deny: agent tools Lambda must never mutate task status
+    // ResourceGroupsTaggingAPI: read resources + tag compliance (get_tag_compliance tool)
     agentToolsLambdaRole.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'DenyTaskStatusMutation',
+        sid: 'TaggingAPIReadOnly',
+        effect: iam.Effect.ALLOW,
+        actions: ['tag:GetResources', 'tag:GetTagKeys', 'tag:GetTagValues'],
+        resources: ['*'],
+      }),
+    );
+
+    // SSM: read required tag keys parameter
+    agentToolsLambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'SsmReadRequiredTagKeys',
+        effect: iam.Effect.ALLOW,
+        actions: ['ssm:GetParameter'],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter${SSM_REQUIRED_TAG_KEYS}`,
+        ],
+      }),
+    );
+
+    // Explicit deny: agent tools Lambda must never hard-delete tasks
+    agentToolsLambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'DenyTaskHardDelete',
         effect: iam.Effect.DENY,
-        actions: ['dynamodb:UpdateItem', 'dynamodb:DeleteItem'],
+        actions: ['dynamodb:DeleteItem'],
         resources: [props.taskTableArn],
       }),
     );
@@ -241,6 +275,7 @@ export class AgentStack extends cdk.Stack {
         TABLE_NAME: props.taskTableName,
         STATUS_INDEX_NAME: props.statusIndexName,
         REGION: this.region,
+        REQUIRED_TAG_KEYS_PARAM: SSM_REQUIRED_TAG_KEYS,
       },
     });
 
@@ -335,9 +370,26 @@ export class AgentStack extends cdk.Stack {
                 },
               },
               {
+                name: 'get_tag_compliance',
+                description:
+                  'Find resources that are missing required tags (Environment, Owner, Project). Returns each resource\'s ARN, existing tags, and which required tags are absent. Use the existing tags on sibling resources to infer what values to propose.',
+                parameters: {
+                  resource_type: {
+                    type: 'string',
+                    description: 'Filter by AWS resource type in ResourceGroupsTaggingAPI format (e.g. s3, ec2:instance, lambda:function). Omit to check all resource types.',
+                    required: false,
+                  },
+                  max_results: {
+                    type: 'integer',
+                    description: 'Maximum number of non-compliant resources to return (default: 20, max: 50).',
+                    required: false,
+                  },
+                },
+              },
+              {
                 name: 'queue_task',
                 description:
-                  'Queue a remediation task for analyst approval. Only use for enable_s3_logging or enable_s3_encryption. Always explain your rationale before calling this.',
+                  'Queue a remediation task for analyst approval. Only use for enable_s3_logging or tag_resource. Always explain your rationale before calling this.',
                 parameters: {
                   finding_id: {
                     type: 'string',
@@ -346,17 +398,57 @@ export class AgentStack extends cdk.Stack {
                   },
                   resource_id: {
                     type: 'string',
-                    description: 'The AWS resource ARN or ID that will be remediated (e.g. arn:aws:s3:::my-bucket).',
+                    description: 'The AWS resource ARN that will be remediated (e.g. arn:aws:s3:::my-bucket).',
                     required: true,
                   },
                   action: {
                     type: 'string',
-                    description: 'Remediation action: enable_s3_logging or enable_s3_encryption.',
+                    description: 'Remediation action: enable_s3_logging or tag_resource.',
                     required: true,
                   },
                   rationale: {
                     type: 'string',
                     description: 'Plain-English explanation of why this action is needed and what risk it addresses.',
+                    required: true,
+                  },
+                  action_params: {
+                    type: 'string',
+                    description: 'Required for tag_resource: JSON object of tag key-value pairs to apply (e.g. {"Environment":"prod","Owner":"team-security","Project":"payments"}). Infer values from resource name and existing tags on sibling resources.',
+                    required: false,
+                  },
+                },
+              },
+              {
+                name: 'get_enabled_standards',
+                description:
+                  'List the Security Hub compliance standards currently enabled in this account (e.g. NIST SP 800-53, CIS, FSBP, PCI DSS). Always call this before get_compliance_report to confirm a standard is active.',
+                parameters: {},
+              },
+              {
+                name: 'get_compliance_report',
+                description:
+                  'Generate a compliance posture report for a specific Security Hub standard. Returns control counts by severity, number of active failing findings, and the top failing control families. Use get_enabled_standards first to confirm the standard is enabled.',
+                parameters: {
+                  standard_name: {
+                    type: 'string',
+                    description: 'The standard to report on. Use a short name like "nist-800-53", "cis", "fsbp", or "pci". Partial matches are supported.',
+                    required: true,
+                  },
+                },
+              },
+              {
+                name: 'cancel_task',
+                description:
+                  'Cancel a PENDING task that you queued in error. Only works on PENDING tasks — cannot undo APPROVED or EXECUTED tasks.',
+                parameters: {
+                  task_id: {
+                    type: 'string',
+                    description: 'The task_id of the PENDING task to cancel.',
+                    required: true,
+                  },
+                  reason: {
+                    type: 'string',
+                    description: 'Brief explanation of why this task is being cancelled.',
                     required: true,
                   },
                 },
@@ -382,15 +474,23 @@ export class AgentStack extends cdk.Stack {
     // ── Bedrock Agent Alias (prod) → DRAFT ────────────────────────────────
     // Pointing to DRAFT means the alias always reflects the latest PrepareAgent
     // result — no manual version creation or alias updates needed on redeploy.
+    // No routingConfiguration — Bedrock defaults the alias to DRAFT automatically.
+    // Specifying DRAFT explicitly is rejected by the API (400 InvalidRequest).
     const agentAlias = new bedrock.CfnAgentAlias(this, 'SecurityTriageAgentAlias', {
       agentAliasName: 'prod',
       agentId: agent.attrAgentId,
-      routingConfiguration: [{ agentVersion: 'DRAFT' }],
     });
     agentAlias.addDependency(agent);
 
     this.agentId = agent.attrAgentId;
     this.agentAliasId = agentAlias.attrAgentAliasId;
+
+    // ── SSM: required tag keys — configurable without redeployment ────────
+    new ssm.StringParameter(this, 'RequiredTagKeysParam', {
+      parameterName: SSM_REQUIRED_TAG_KEYS,
+      stringValue: JSON.stringify(['Environment', 'Owner', 'Project']),
+      description: 'JSON array of tag keys required on all resources. Edit this parameter to change your tagging policy without redeploying.',
+    });
 
     // ── SSM Parameters — API Lambda reads these at cold start ──────────────
     // Avoids circular stack dependency: SecurityTriageStack deploys first,
@@ -442,7 +542,7 @@ export class AgentStack extends cdk.Stack {
       properties: {
         agentId: agent.attrAgentId,
         foundationModel: FOUNDATION_MODEL,
-        configVersion: '1',
+        configVersion: '4',
       },
     });
 

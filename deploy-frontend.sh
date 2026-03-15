@@ -35,6 +35,7 @@ fi
 # ── Parse CDK outputs ─────────────────────────────────────────────────────────
 BUCKET=$(node -e "const o=require('./$OUTPUTS_FILE'); const s=Object.values(o).find(s=>s.FrontendBucketName); console.log(s?.FrontendBucketName ?? '')")
 DIST_ID=$(node -e "const o=require('./$OUTPUTS_FILE'); const s=Object.values(o).find(s=>s.DistributionId); console.log(s?.DistributionId ?? '')")
+CF_URL=$(node -e "const o=require('./$OUTPUTS_FILE'); const s=Object.values(o).find(s=>s.DistributionUrl); console.log(s?.DistributionUrl ?? '')")
 
 if [[ -z "$BUCKET" || -z "$DIST_ID" ]]; then
   echo "ERROR: Could not read FrontendBucketName or DistributionId from $OUTPUTS_FILE"
@@ -45,6 +46,7 @@ fi
 echo "    Profile : ${PROFILE:-default}"
 echo "    Bucket  : $BUCKET"
 echo "    Dist ID : $DIST_ID"
+echo "    URL     : $CF_URL"
 
 # ── Build and deploy ──────────────────────────────────────────────────────────
 echo ""
@@ -63,3 +65,5 @@ aws cloudfront create-invalidation \
 
 echo ""
 echo "Frontend deployed."
+echo ""
+echo "Open your browser at: $CF_URL"

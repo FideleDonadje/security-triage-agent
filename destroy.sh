@@ -104,12 +104,11 @@ aws s3api delete-bucket --bucket "$LOGS_BUCKET" --region "$REGION" 2>/dev/null \
 
 # SSM parameters (created by AgentStack — may already be gone with the stack)
 echo "    Deleting SSM parameters..."
-aws ssm delete-parameter --name /security-triage/agent-id --region "$REGION" 2>/dev/null \
-  && echo "    /security-triage/agent-id deleted." \
-  || echo "    /security-triage/agent-id not found — skipping."
-aws ssm delete-parameter --name /security-triage/agent-alias-id --region "$REGION" 2>/dev/null \
-  && echo "    /security-triage/agent-alias-id deleted." \
-  || echo "    /security-triage/agent-alias-id not found — skipping."
+for PARAM in /security-triage/agent-id /security-triage/agent-alias-id /security-triage/required-tag-keys; do
+  aws ssm delete-parameter --name "$PARAM" --region "$REGION" 2>/dev/null \
+    && echo "    $PARAM deleted." \
+    || echo "    $PARAM not found — skipping."
+done
 
 # ── Step 3: Clean local artefacts ─────────────────────────────────────────────
 echo ""
@@ -117,10 +116,35 @@ echo "==> Cleaning local build artefacts..."
 rm -f cdk-outputs.json
 rm -rf cdk/cdk.out
 
+# ── Step 4: Print manual cleanup reference ────────────────────────────────────
+# CDK does not delete RETAIN resources automatically. The steps above attempt
+# deletion, but if anything was skipped or failed, use these commands to finish.
 echo ""
 echo "=================================================="
 echo " Teardown complete."
 echo " Note: Cognito domain deletion can take a few minutes to"
 echo " propagate. Wait ~2 min before redeploying."
 echo "=================================================="
+echo ""
+echo "── Manual cleanup (run these if any resource above was not deleted) ──────"
+echo ""
+echo "  # DynamoDB task table"
+echo "  aws dynamodb delete-table --table-name security-triage-tasks --region $REGION"
+echo ""
+echo "  # Cognito User Pool (look up ID first)"
+echo "  POOL_ID=\$(aws cognito-idp list-user-pools --max-results 60 --region $REGION \\"
+echo "    --query \"UserPools[?Name=='security-triage-analysts'].Id\" --output text)"
+echo "  aws cognito-idp delete-user-pool --user-pool-id \"\$POOL_ID\" --region $REGION"
+echo ""
+echo "  # S3 frontend bucket"
+echo "  aws s3 rm s3://security-triage-frontend-${ACCOUNT}-${REGION}/ --recursive"
+echo "  aws s3api delete-bucket --bucket security-triage-frontend-${ACCOUNT}-${REGION} --region $REGION"
+echo ""
+echo "  # S3 access logs bucket"
+echo "  aws s3 rm s3://security-triage-access-logs-${ACCOUNT}-${REGION}/ --recursive"
+echo "  aws s3api delete-bucket --bucket security-triage-access-logs-${ACCOUNT}-${REGION} --region $REGION"
+echo ""
+echo "  # SSM parameters"
+echo "  aws ssm delete-parameters --region $REGION \\"
+echo "    --names /security-triage/agent-id /security-triage/agent-alias-id /security-triage/required-tag-keys"
 echo ""

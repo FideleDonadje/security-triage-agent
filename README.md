@@ -85,7 +85,7 @@ flowchart TB
 
     subgraph executionlayer[" Execution — separate IAM role "]
         ExecLambda["Execution Lambda"]
-        S3["S3\nPutBucketLogging\nPutEncryptionConfiguration"]
+        S3["S3\nPutBucketLogging\nResourceGroupsTaggingAPI TagResources"]
         ExecLambda -->|"tags every resource touched"| S3
     end
 
@@ -132,7 +132,9 @@ flowchart TB
 - Chat UI + Task Queue panel (two-panel layout)
 - Agent investigates Security Hub findings on demand
 - GuardDuty, Config, and CloudTrail enrichment
-- Two autonomous actions: enable S3 access logging, enable S3 default encryption
+- Two autonomous actions: enable S3 access logging, apply required resource tags (Environment / Owner / Project)
+- Compliance posture reports against any enabled Security Hub standard (NIST 800-53, CIS, FSBP, PCI DSS)
+- Task management: analyst can approve, reject, or dismiss tasks; agent can cancel its own queued tasks
 
 **Out of scope (post-MVP)**
 - Multi-user / role-based approval
@@ -156,16 +158,16 @@ flowchart TB
 │   ├── api/                      # Node.js API layer
 │   │   ├── index.ts              # Handler entry point + CORS
 │   │   ├── auth.ts               # Cognito JWT validation
-│   │   ├── chat.ts               # Bedrock AgentCore proxy
+│   │   ├── chat.ts               # Async Bedrock AgentCore proxy (POST→202, GET poll)
 │   │   └── tasks.ts              # Task queue CRUD
 │   ├── agent-tools/              # Bedrock action group handler
-│   │   └── index.ts              # get_findings, get_threat_context, queue_task, etc.
+│   │   └── index.ts              # get_findings, get_threat_context, get_tag_compliance, get_enabled_standards, get_compliance_report, queue_task, cancel_task, etc.
 │   ├── agent-prepare/            # CDK custom resource — prepares agent after deploy
 │   │   └── index.ts
-│   └── execution/                # Execution Lambda — S3 remediation only
+│   └── execution/                # Execution Lambda — remediation actions
 │       ├── index.ts              # Handler + DynamoDB stream parser
 │       ├── enable-logging.ts     # S3 PutBucketLogging
-│       └── enable-encryption.ts  # S3 PutEncryptionConfiguration
+│       └── apply-tags.ts         # ResourceGroupsTaggingAPI TagResources
 ├── frontend/                     # React + Vite SPA
 │   ├── src/
 │   │   ├── App.tsx
@@ -199,11 +201,62 @@ flowchart TB
 
 ## Prerequisites
 
-Two things that require manual action before deploying (AWS account-level gates — no API to automate):
+### AWS services — must be enabled before deploying
+
+The agent queries these services at runtime. If they are not active, the agent has no data to work with.
+
+| Service | Required | What happens without it |
+|---|---|---|
+| **AWS Security Hub** | Yes | Agent returns no findings — nothing to investigate |
+| **AWS Config** | Yes | No compliance history — agent cannot answer "was this always misconfigured?" |
+| **AWS CloudTrail** | Yes (usually already on) | No audit trail — agent cannot identify who made a change or when |
+| **Amazon GuardDuty** | Recommended | No threat context — agent skips threat correlation but still works |
+
+**Enable Security Hub** (the `--enable-default-standards` flag activates FSBP and CIS automatically):
+```bash
+aws securityhub enable-security-hub --enable-default-standards --region us-east-1
+```
+
+To enable NIST SP 800-53 or PCI DSS, go to **Security Hub → Security standards** in the console and toggle the standard on. The agent's `get_enabled_standards` tool will list whichever standards are active, and `get_compliance_report` will generate a posture report for any of them.
+
+
+**Enable Config** (requires an S3 bucket for delivery):
+```bash
+aws configservice put-configuration-recorder \
+  --configuration-recorder name=default,roleARN=arn:aws:iam::<account>:role/config-role
+aws configservice put-delivery-channel \
+  --delivery-channel name=default,s3BucketName=<your-config-bucket>
+aws configservice start-configuration-recorder --configuration-recorder-name default
+```
+
+**Enable GuardDuty:**
+```bash
+aws guardduty create-detector --enable --region us-east-1
+```
+
+CloudTrail is enabled by default in most accounts via the AWS Organizations trail. Verify with:
+```bash
+aws cloudtrail describe-trails --include-shadow-trails false
+```
+
+> **Multi-account setup:** Deploy the agent in your Security Hub [delegated administrator account](https://docs.aws.amazon.com/securityhub/latest/userguide/designate-orgs-admin-account.html). Security Hub, GuardDuty, and Config aggregated views automatically cover all member accounts — no per-account configuration needed.
+
+### Tools and Bedrock access
+
+Two additional manual steps (AWS account-level gates — no API to automate):
 
 1. **Bedrock model access** — enable **Claude Sonnet 4.5** (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`)
    in the [Bedrock Model Access console](https://console.aws.amazon.com/bedrock/home#/modelaccess).
-2. **AWS Security Hub** — enable it in the target region if not already active.
+2. **Bedrock cross-region inference** — the agent uses the `us.*` inference profile which routes across
+   `us-east-1`, `us-east-2`, and `us-west-2`. Ensure Bedrock model access is enabled in all three regions
+   if you want full throughput.
+
+Tools required on your machine:
+- AWS CLI v2 (`aws configure` with admin permissions)
+- Node.js 22+
+- AWS CDK CLI: `npm install -g aws-cdk`
+- **Git Bash** (Windows) — all scripts (`deploy.sh`, `deploy-frontend.sh`, `destroy.sh`) are bash scripts.
+  Run them from Git Bash or with `bash ./deploy.sh ...` — they will not work in PowerShell directly.
 
 Everything else is handled by the deploy script.
 
@@ -234,7 +287,8 @@ This single script handles everything:
 - Prints the two remaining manual commands with the correct IDs filled in
 
 > **What CDK wires automatically:**
-> - Cognito hosted UI domain (`security-triage-<account>.auth.<region>.amazoncognito.com`)
+> - Cognito hosted UI domain — default prefix is `security-triage-ops`. Override at deploy time with:
+>   `cdk deploy -c cognitoDomainPrefix=my-custom-prefix`
 > - Cognito callback URLs (CloudFront + localhost for local dev)
 > - `ALLOWED_ORIGIN` on the API Lambda (set to the CloudFront URL)
 > - Bedrock Agent ID and alias ID written to SSM — API Lambda reads them at cold start
@@ -249,7 +303,7 @@ aws cognito-idp admin-create-user \
   --user-pool-id <from script output> \
   --username analyst@example.com \
   --user-attributes Name=email,Value=analyst@example.com Name=email_verified,Value=true \
-  --temporary-password "Temp1234!" \
+  --temporary-password "TempAccess123!" \
   --message-action SUPPRESS
 ```
 
@@ -272,9 +326,9 @@ Fill in `frontend/.env.local` — all values come from `cdk-outputs.json`:
 ```
 VITE_API_URL=<ApiUrl>
 VITE_USER_POOL_ID=<UserPoolId>
-VITE_USER_POOL_CLIENT_ID=<UserPoolClientId>
-VITE_COGNITO_DOMAIN=<CognitoDomain>
-VITE_REDIRECT_URI=<DistributionUrl>/
+VITE_CLIENT_ID=<UserPoolClientId>
+VITE_COGNITO_DOMAIN=https://<CognitoDomain>
+VITE_REDIRECT_URI=<DistributionUrl>
 ```
 
 ### Step 4 — Deploy the frontend
@@ -350,14 +404,19 @@ cd cdk && cdk import SecurityTriageStack
 
 ### Scenario 2 — Approve a task and verify execution
 
+**2a — S3 logging:**
 1. In the chat, type: *"Check if any S3 buckets are missing access logging and queue a fix."*
-2. **Expected:** The agent queries Security Hub, identifies a non-compliant bucket,
-   and queues a `enable_s3_logging` task visible in the Task Queue panel.
-3. Click **Approve** on the task.
-4. **Expected:** Task status changes to `APPROVED`, then shortly to `EXECUTED`.
-5. Verify in the AWS console:
-   - S3 bucket → Properties → Server access logging → Enabled
-   - Bucket has tag `security-agent-action: true`
+2. **Expected:** The agent queries Security Hub, identifies a non-compliant bucket, and queues an `enable_s3_logging` task in the Task Queue panel.
+3. Click **Approve**. Task status changes to `APPROVED` then `EXECUTED`.
+4. Verify in the console: S3 bucket → Properties → Server access logging → Enabled. Bucket has tag `security-agent-action: true`.
+
+**2b — Resource tagging:**
+1. In the chat, type: *"Find resources missing required tags and queue fixes."*
+2. **Expected:** The agent calls `get_tag_compliance`, identifies non-compliant resources, infers tag values from sibling resource patterns, and queues `tag_resource` tasks with proposed values (e.g. `Environment=prod, Owner=team-security, Project=payments`).
+3. Click **Approve** on a task. Task status changes to `EXECUTED`.
+4. Verify in the console: the resource now has the `Environment`, `Owner`, and `Project` tags plus `security-agent-action: true`.
+
+> **Tag values are configurable:** Edit the SSM parameter `/security-triage/required-tag-keys` to change which tags are enforced. The Lambda picks up the new list on the next cold start — no redeployment needed.
 
 ### Scenario 3 — Query the task queue
 
@@ -365,7 +424,28 @@ cd cdk && cdk import SecurityTriageStack
 2. **Expected:** The agent returns a clear summary of pending and recent tasks,
    including the action, resource, and rationale for each.
 
-If all three scenarios work, the MVP is complete.
+### Scenario 4 — Cancel a queued task
+
+1. Ask the agent to queue any task, then say: *"Actually, cancel that last task."*
+2. **Expected:** The agent calls `cancel_task`, the task moves to CANCELLED in DynamoDB,
+   and it no longer appears under **Awaiting Approval**.
+
+### Scenario 5 — Dismiss failed or rejected tasks
+
+1. Reject a pending task, or let a task fail.
+2. In the **Recent Activity** list, click the **×** button on the FAILED or REJECTED row.
+3. **Expected:** The row disappears from the activity list immediately.
+
+### Scenario 6 — Compliance posture report
+
+1. In the chat, type: *"What compliance standards do we have enabled?"*
+2. **Expected:** The agent calls `get_enabled_standards` and lists active standards (e.g. NIST SP 800-53, CIS AWS Foundations, FSBP).
+3. Follow up with: *"Generate a NIST 800-53 compliance report."*
+4. **Expected:** The agent returns a structured summary — total controls enabled/disabled, active failing findings count, and the top failing control families (e.g. AC, AU, SC) with the specific controls involved.
+
+> **Note:** This requires NIST 800-53 to be enabled in Security Hub. Run `get_enabled_standards` first to confirm which standards are active in your account.
+
+If all six scenarios work, the MVP is complete.
 
 ---
 
@@ -402,16 +482,6 @@ aws cognito-idp describe-user-pool-client \
 AgentStack has not finished deploying yet, so the SSM parameters
 (`/security-triage/agent-id`, `/security-triage/agent-alias-id`) do not exist.
 Run `cdk deploy --all` and wait for AgentStack to complete, then retry.
-
-### Agent returns stale responses (old model, old instructions)
-
-The Bedrock Agent prod alias is pointing to an old version snapshot instead of DRAFT.
-CDK configures the alias to point to DRAFT by default, so this should only happen if
-the alias was manually changed. Fix:
-
-1. Open **Bedrock → Agents → security-triage-agent → Aliases → prod**
-2. Edit the alias — switch routing to DRAFT
-3. Save
 
 ### "Access denied" calling Bedrock
 
@@ -481,35 +551,22 @@ Tasks move through these states only:
 
 ```
 PENDING → APPROVED → EXECUTED
-PENDING → REJECTED
+PENDING → REJECTED  → DISMISSED  (analyst clears from UI)
+PENDING → CANCELLED             (agent retracts its own queued task)
+           FAILED   → DISMISSED  (analyst clears from UI)
 ```
 
 | Field | Description |
 |---|---|
 | `task_id` | UUID |
-| `status` | PENDING \| APPROVED \| REJECTED \| EXECUTED \| FAILED |
+| `status` | PENDING \| APPROVED \| REJECTED \| EXECUTED \| FAILED \| CANCELLED \| DISMISSED |
 | `finding_id` | Security Hub finding ID |
 | `resource_id` | ARN of the affected resource |
-| `action` | `enable_s3_logging` or `enable_s3_encryption` |
+| `action` | `enable_s3_logging` or `tag_resource` |
+| `action_params` | JSON tag key-value pairs (e.g. `{"Environment":"prod","Owner":"team-security","Project":"payments"}`) — present only for `tag_resource` |
 | `rationale` | Why the agent proposes this action |
 | `risk_tier` | Always 1 for MVP |
 | `approved_by` | Analyst email (set on approval) |
 
 ---
 
-## Development
-
-```bash
-# CDK
-cd cdk && npm run build    # compile TypeScript
-cd cdk && npm run watch    # watch mode
-
-# API Lambda
-cd lambda/api && npm install && npm run build
-
-# Execution Lambda
-cd lambda/execution && npm install && npm run build
-
-# Frontend (local dev — points at deployed API)
-cd frontend && npm run dev
-```

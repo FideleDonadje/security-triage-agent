@@ -10,7 +10,7 @@ context, queues remediation tasks, and executes safe actions after human approva
 - Chat UI — ask the agent to investigate findings
 - Task queue panel — agent surfaces intended actions with rationale
 - Approve / Reject tasks in the UI
-- Two autonomous actions only: enable S3 access logging, enable S3 default encryption
+- Two autonomous actions only: enable S3 access logging, tag_resource (apply required tags)
 - Real Security Hub findings (no mock data in prod)
 - GuardDuty + CloudTrail enrichment on demand
 - Agent checks Security Hub when chat opens, or when analyst asks
@@ -36,9 +36,9 @@ context, queues remediation tasks, and executes safe actions after human approva
 ### Backend
 - Node.js Lambda (Express-style) — thin API layer only, no agent logic
 - Validates Cognito JWT on every request
-- Proxies chat messages to AgentCore
-- Handles task queue CRUD against DynamoDB
-- Triggers Execution Lambda on approval
+- Chat uses async pattern: POST /chat → 202 + request_id → GET /chat/result/:id (polls until done). Lambda invokes itself asynchronously to work around API Gateway's 29 s timeout.
+- Handles task queue CRUD against DynamoDB (approve, reject, dismiss via DELETE)
+- Task write actions are separate from Execution Lambda trigger (stream-based)
 
 ### Agent
 - AWS Bedrock AgentCore — owns the agent loop, memory, tool execution
@@ -50,7 +50,7 @@ context, queues remediation tasks, and executes safe actions after human approva
 ### Execution Lambda
 - Separate function, separate IAM role
 - Only triggered by DynamoDB approval event (status: PENDING → APPROVED)
-- Only two actions: enable_s3_logging, enable_s3_encryption
+- Only two actions: enable_s3_logging, tag_resource
 - Tags every resource it touches: security-agent-action: true + timestamp
 
 ### Data
@@ -70,7 +70,7 @@ context, queues remediation tasks, and executes safe actions after human approva
 
 1. The agent IAM role has ZERO write permissions to AWS services
 2. Only the Execution Lambda writes to AWS resources
-3. The agent's only write action is queue_task → DynamoDB
+3. The agent's only write actions are queue_task (PutItem) and cancel_task (UpdateItem PENDING→CANCELLED) → DynamoDB only
 4. Every autonomous action must leave a tag on the resource
 5. Execution Lambda is only triggered by an APPROVED task in DynamoDB
 6. No AWS credentials ever reach the browser
@@ -83,16 +83,19 @@ context, queues remediation tasks, and executes safe actions after human approva
 
 Tasks flow through these states only:
 PENDING → APPROVED → EXECUTED
-PENDING → REJECTED
+PENDING → REJECTED  → DISMISSED  (analyst clears from UI)
+PENDING → CANCELLED             (agent retracts via cancel_task)
+           FAILED   → DISMISSED  (analyst clears from UI)
 
 ### Task record shape (DynamoDB)
 ```json
 {
   "task_id": "uuid",
-  "status": "PENDING | APPROVED | REJECTED | EXECUTED | FAILED",
+  "status": "PENDING | APPROVED | REJECTED | EXECUTED | FAILED | CANCELLED | DISMISSED",
   "finding_id": "SH-2024-001",
   "resource_id": "arn:aws:s3:::bucket-name",
-  "action": "enable_s3_logging | enable_s3_encryption",
+  "action": "enable_s3_logging | tag_resource",
+  "action_params": "{\"Environment\":\"prod\",\"Owner\":\"team-security\",\"Project\":\"payments\"} (JSON string, required for tag_resource, omitted otherwise)",
   "rationale": "why the agent wants to do this",
   "risk_tier": 1,
   "created_at": "ISO8601",
@@ -109,22 +112,29 @@ PENDING → REJECTED
 
 - **Tier 1** — agent queues, analyst approves in UI, Execution Lambda acts
   - enable S3 access logging
-  - enable S3 default encryption
+  - tag_resource — apply required tags (Environment, Owner, Project) to any resource ARN
 - **Tier 2** — post-MVP, requires senior analyst approval (not built yet)
 - **Tier 3** — post-MVP, out-of-band approval required (not built yet)
 
 ---
 
-## AgentCore tools (read-only except queue_task)
+## AgentCore tools (read-only except queue_task and cancel_task)
 
 ```
-get_findings        → Security Hub GetFindings
-get_threat_context  → GuardDuty ListFindings + GetFindings
-get_config_status   → Config DescribeComplianceByResource
-get_trail_events    → CloudTrail LookupEvents
-queue_task          → DynamoDB PutItem (agent's ONLY write)
-get_task_queue      → DynamoDB Query (read pending tasks)
+get_findings            → Security Hub GetFindings
+get_threat_context      → GuardDuty ListFindings + GetFindings
+get_config_status       → Config DescribeComplianceByResource
+get_trail_events        → CloudTrail LookupEvents
+get_tag_compliance      → ResourceGroupsTaggingAPI GetResources (find resources missing required tags)
+get_enabled_standards   → Security Hub GetEnabledStandards + DescribeStandards
+get_compliance_report   → Security Hub DescribeStandardsControls + GetFindings (compliance posture by standard)
+queue_task              → DynamoDB PutItem (queue a remediation task)
+cancel_task             → DynamoDB UpdateItem PENDING→CANCELLED (retract a queued task)
+get_task_queue          → DynamoDB Query (read pending/recent tasks)
 ```
+
+Required tag keys are stored in SSM at `/security-triage/required-tag-keys` as a JSON array.
+Default: `["Environment","Owner","Project"]`. Edit the parameter to change the policy without redeploying.
 
 ---
 
@@ -146,10 +156,10 @@ get_task_queue      → DynamoDB Query (read pending tasks)
 │   │   ├── auth.ts
 │   │   ├── chat.ts
 │   │   └── tasks.ts
-│   └── execution/              ← Execution Lambda (S3 actions)
+│   └── execution/              ← Execution Lambda (remediation actions)
 │       ├── index.ts
 │       ├── enable-logging.ts
-│       └── enable-encryption.ts
+│       └── apply-tags.ts
 ├── frontend/                   ← React + Vite
 │   ├── src/
 │   │   ├── App.tsx

@@ -1,19 +1,23 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getTasks, approveTask, rejectTask } from '../lib/api';
+import { getTasks, approveTask, rejectTask, dismissTask } from '../lib/api';
 import type { Task, TaskStatus } from '../lib/api';
 
 const POLL_MS = 30_000;
 
 const ACTION_LABELS: Record<string, string> = {
   enable_s3_logging: 'Enable S3 Logging',
-  enable_s3_encryption: 'Enable S3 Encryption',
+  tag_resource: 'Tag Resource',
 };
 
 const ACTIVITY_STATUSES: TaskStatus[] = ['EXECUTED', 'REJECTED', 'FAILED'];
 
-// Last segment of an ARN, or the full string if it is not an ARN
+// Shorten any ARN to a readable label: last non-empty path segment
 function resourceLabel(resourceId: string): string {
-  return resourceId.replace('arn:aws:s3:::', '').split('/')[0];
+  if (!resourceId.startsWith('arn:aws:')) return resourceId;
+  // e.g. arn:aws:s3:::my-bucket → my-bucket
+  //      arn:aws:cognito-idp:us-east-1:123:userpool/us-east-1_abc → userpool/us-east-1_abc
+  const withoutPrefix = resourceId.replace(/^arn:aws:[^:]*:[^:]*:[^:]*:/, '');
+  return withoutPrefix || resourceId;
 }
 
 // ── Component ──────────────────────────────────────────────────────────────────
@@ -23,7 +27,7 @@ export default function TaskQueue() {
   const [activity, setActivity] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [actioning, setActioning] = useState<Record<string, 'approving' | 'rejecting'>>({});
+  const [actioning, setActioning] = useState<Record<string, 'approving' | 'rejecting' | 'dismissing'>>({});
 
   const fetchAll = useCallback(async () => {
     try {
@@ -127,7 +131,18 @@ export default function TaskQueue() {
           <>
             <SectionHeader title="Recent activity" count={activity.length} />
             {activity.slice(0, 20).map((task) => (
-              <ActivityRow key={task.task_id} task={task} />
+              <ActivityRow
+                key={task.task_id}
+                task={task}
+                dismissing={actioning[task.task_id] === 'dismissing'}
+                onDismiss={() => {
+                  setActioning((prev) => ({ ...prev, [task.task_id]: 'dismissing' }));
+                  dismissTask(task.task_id)
+                    .then(() => fetchAll())
+                    .catch((err) => setError(`Dismiss failed: ${(err as Error).message}`))
+                    .finally(() => setActioning(({ [task.task_id]: _, ...rest }) => rest));
+                }}
+              />
             ))}
           </>
         )}
@@ -153,7 +168,7 @@ function SectionHeader({ title, count, loading }: { title: string; count: number
 
 interface PendingCardProps {
   task: Task;
-  actionState?: 'approving' | 'rejecting';
+  actionState?: 'approving' | 'rejecting' | 'dismissing';
   onApprove: () => void;
   onReject: () => void;
 }
@@ -204,23 +219,57 @@ const STATUS_COLORS: Partial<Record<TaskStatus, string>> = {
   FAILED: 'var(--red)',
 };
 
-function ActivityRow({ task }: { task: Task }) {
+const DISMISSIBLE: TaskStatus[] = ['FAILED', 'REJECTED'];
+
+function ActivityRow({ task, dismissing, onDismiss }: {
+  task: Task;
+  dismissing: boolean;
+  onDismiss: () => void;
+}) {
   const color = STATUS_COLORS[task.status] ?? 'var(--muted)';
+  const isFailed = task.status === 'FAILED';
+  const canDismiss = DISMISSIBLE.includes(task.status);
   return (
-    <div style={styles.activityRow}>
-      <div style={styles.activityLeft}>
-        <span style={{ ...styles.activityStatus, color }}>{task.status}</span>
-        <span style={styles.activityAction}>{ACTION_LABELS[task.action] ?? task.action}</span>
-        <span style={styles.activityResource} title={task.resource_id}>
-          {resourceLabel(task.resource_id)}
-        </span>
+    <div style={{ ...styles.activityRow, flexDirection: 'column', alignItems: 'stretch' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={styles.activityLeft}>
+          <span style={{ ...styles.activityStatus, color }}>{task.status}</span>
+          <span style={styles.activityAction}>{ACTION_LABELS[task.action] ?? task.action}</span>
+          <span style={styles.activityResource} title={task.resource_id}>
+            {resourceLabel(task.resource_id)}
+          </span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <span style={styles.activityTime}>{formatRelative(task.created_at)}</span>
+          {canDismiss && (
+            <button
+              onClick={onDismiss}
+              disabled={dismissing}
+              style={styles.dismissTaskBtn}
+              title="Dismiss from activity list"
+            >
+              {dismissing ? '…' : '×'}
+            </button>
+          )}
+        </div>
       </div>
-      <span style={styles.activityTime}>{formatRelative(task.created_at)}</span>
+      {isFailed && task.result && (
+        <div style={styles.failureReason} title={task.result}>
+          {formatFailureReason(task.result)}
+        </div>
+      )}
     </div>
   );
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
+
+function formatFailureReason(result: string): string {
+  // IAM denial: "...is not authorized to perform: cognito-idp:TagResource on resource:..."
+  const match = result.match(/not authorized to perform:\s*(\S+)/);
+  if (match) return `Permission denied: ${match[1]}`;
+  return result;
+}
 
 function formatRelative(iso: string): string {
   try {
@@ -436,6 +485,25 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
     color: 'var(--muted)',
     flexShrink: 0,
+  },
+  dismissTaskBtn: {
+    background: 'transparent',
+    border: 'none',
+    color: 'var(--muted)',
+    fontSize: 16,
+    lineHeight: 1,
+    padding: '0 2px',
+    cursor: 'pointer',
+    opacity: 0.6,
+  },
+  failureReason: {
+    fontSize: 11,
+    color: 'var(--red)',
+    marginTop: 4,
+    paddingTop: 4,
+    borderTop: '1px solid rgba(248, 81, 73, 0.2)',
+    lineHeight: 1.4,
+    wordBreak: 'break-word' as const,
   },
 };
 

@@ -4,7 +4,7 @@ import { getStoredToken, redirectToLogin } from './auth';
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 export type TaskStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXECUTED' | 'FAILED';
-export type TaskAction = 'enable_s3_logging' | 'enable_s3_encryption';
+export type TaskAction = 'enable_s3_logging' | 'tag_resource';
 
 export interface Task {
   task_id: string;
@@ -64,11 +64,28 @@ export async function sendChat(
   message: string,
   sessionId?: string,
 ): Promise<{ reply: string; session_id: string }> {
-  const res = await authFetch('/chat', {
+  // POST returns 202 immediately with a request_id
+  const startRes = await authFetch('/chat', {
     method: 'POST',
     body: JSON.stringify({ message, session_id: sessionId }),
   });
-  return res.json() as Promise<{ reply: string; session_id: string }>;
+  const start = await startRes.json() as { request_id: string; session_id: string };
+
+  // Poll until the async worker finishes (max 3 minutes)
+  const maxPolls = 90;
+  for (let i = 0; i < maxPolls; i++) {
+    await delay(2000);
+    const pollRes = await authFetch(`/chat/result/${encodeURIComponent(start.request_id)}`);
+    const data = await pollRes.json() as { status?: string; reply?: string; session_id?: string };
+    if (data.status !== 'pending') {
+      return { reply: data.reply!, session_id: data.session_id ?? start.session_id };
+    }
+  }
+  throw new Error('Agent took too long to respond. Please try again.');
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function getTasks(
@@ -84,4 +101,8 @@ export async function approveTask(taskId: string): Promise<void> {
 
 export async function rejectTask(taskId: string): Promise<void> {
   await authFetch(`/tasks/${encodeURIComponent(taskId)}/reject`, { method: 'POST' });
+}
+
+export async function dismissTask(taskId: string): Promise<void> {
+  await authFetch(`/tasks/${encodeURIComponent(taskId)}`, { method: 'DELETE' });
 }

@@ -21,10 +21,12 @@ const frontendStack = new FrontendStack(app, 'SecurityTriageFrontendStack', {
 const frontendUrl = `https://${frontendStack.distribution.distributionDomainName}`;
 
 // 2. Core stack — receives the CloudFront URL for Cognito callback URLs + CORS
+// Override Cognito prefix at deploy time: cdk deploy -c cognitoDomainPrefix=my-prefix
 const mainStack = new SecurityTriageStack(app, 'SecurityTriageStack', {
   env,
   description: 'Security Triage Agent — core resources (Cognito, DynamoDB, Lambdas, API GW, WAF)',
   frontendUrl,
+  cognitoDomainPrefix: app.node.tryGetContext('cognitoDomainPrefix') as string | undefined,
 });
 mainStack.addDependency(frontendStack);
 

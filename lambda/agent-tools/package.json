@@ -17,6 +17,8 @@
     "@aws-sdk/client-config-service": "^3.0.0",
     "@aws-sdk/client-cloudtrail": "^3.0.0",
     "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/lib-dynamodb": "^3.0.0"
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/client-resource-groups-tagging-api": "^3.0.0",
+    "@aws-sdk/client-ssm": "^3.0.0"
   }
 }

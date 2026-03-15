@@ -145,6 +145,49 @@ export async function handleRejectTask(
   return ok({ task_id: taskId, status: 'REJECTED' });
 }
 
+/**
+ * DELETE /tasks/{task_id}
+ *
+ * Analyst dismisses a FAILED, REJECTED, or CANCELLED task from the activity list.
+ * Marks as DISMISSED — preserves the record for audit but hides it from the UI.
+ */
+export async function handleDismissTask(
+  event: APIGatewayProxyEvent,
+  _auth: AuthContext,
+): Promise<APIGatewayProxyResult> {
+  const taskId = event.pathParameters?.task_id;
+  if (!taskId) return err(400, 'task_id path parameter is required');
+
+  const existing = await ddb.send(new GetCommand({ TableName: TABLE, Key: { task_id: taskId } }));
+  if (!existing.Item) return err(404, 'Task not found');
+
+  const dismissible = ['FAILED', 'REJECTED', 'CANCELLED'];
+  if (!dismissible.includes(existing.Item.status as string)) {
+    return err(409, `Cannot dismiss task with status '${existing.Item.status as string}'`);
+  }
+
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLE,
+      Key: { task_id: taskId },
+      ConditionExpression: '#s IN (:failed, :rejected, :cancelled)',
+      UpdateExpression: 'SET #s = :dismissed',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: {
+        ':failed':    'FAILED',
+        ':rejected':  'REJECTED',
+        ':cancelled': 'CANCELLED',
+        ':dismissed': 'DISMISSED',
+      },
+    }));
+  } catch (e: unknown) {
+    if (isConditionalCheckFailed(e)) return err(409, 'Task status changed concurrently');
+    throw e;
+  }
+
+  return ok({ task_id: taskId, status: 'DISMISSED' });
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function ok(body: unknown): APIGatewayProxyResult {

@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { S3Client } from '@aws-sdk/client-s3';
 import type { DynamoDBStreamEvent, DynamoDBRecord } from 'aws-lambda';
 import { enableS3Logging } from './enable-logging';
-import { enableS3Encryption } from './enable-encryption';
+import { applyTags } from './apply-tags';
 
 const REGION = process.env.REGION ?? process.env.AWS_REGION ?? 'us-east-1';
 const TABLE = process.env.TABLE_NAME!;
@@ -17,7 +17,7 @@ const ddb = DynamoDBDocumentClient.from(
 const s3 = new S3Client({ region: REGION });
 
 // Only these two actions are allowed in MVP Tier 1
-const ALLOWED_ACTIONS = new Set(['enable_s3_logging', 'enable_s3_encryption']);
+const ALLOWED_ACTIONS = new Set(['enable_s3_logging', 'tag_resource']);
 
 /**
  * Execution Lambda — triggered by DynamoDB stream when task status → APPROVED.
@@ -25,7 +25,7 @@ const ALLOWED_ACTIONS = new Set(['enable_s3_logging', 'enable_s3_encryption']);
  * ARCHITECTURE RULES enforced here:
  *  1. Only fires on PENDING → APPROVED transitions (not on re-approval or other changes)
  *  2. Only executes actions in ALLOWED_ACTIONS
- *  3. Only touches S3 resources (arn:aws:s3:::*)
+ *  3. Validates resource ARN and action_params before executing
  *  4. Tags every modified resource
  *  5. Marks the task EXECUTED on success, FAILED on any error
  *  6. Never throws — errors are captured and written back to DynamoDB
@@ -59,6 +59,7 @@ async function processRecord(record: DynamoDBRecord): Promise<void> {
 
   const action = newImage.action?.S;
   const resourceId = newImage.resource_id?.S;
+  const actionParams = newImage.action_params?.S;
   const findingId = newImage.finding_id?.S ?? 'unknown';
 
   console.log('Processing approved task', { taskId, action, resourceId, findingId });
@@ -69,16 +70,18 @@ async function processRecord(record: DynamoDBRecord): Promise<void> {
     return;
   }
 
-  if (!resourceId?.startsWith('arn:aws:s3:::')) {
-    await markFailed(taskId, `Rejected: resource '${resourceId}' is not an S3 ARN (arn:aws:s3:::*)`);
+  if (!resourceId?.startsWith('arn:aws:')) {
+    await markFailed(taskId, `Rejected: resource '${resourceId}' is not a valid AWS ARN`);
     return;
   }
 
-  // Extract bucket name from ARN: arn:aws:s3:::bucket-name[/optional-key]
-  const bucketName = resourceId.replace('arn:aws:s3:::', '').split('/')[0];
+  if (action === 'enable_s3_logging' && !resourceId.startsWith('arn:aws:s3:::')) {
+    await markFailed(taskId, `Rejected: enable_s3_logging requires an S3 ARN (arn:aws:s3:::*)`);
+    return;
+  }
 
-  if (!bucketName) {
-    await markFailed(taskId, `Rejected: could not extract bucket name from ARN '${resourceId}'`);
+  if (action === 'tag_resource' && !actionParams) {
+    await markFailed(taskId, 'Rejected: tag_resource requires action_params with tag key-value pairs');
     return;
   }
 
@@ -91,10 +94,15 @@ async function processRecord(record: DynamoDBRecord): Promise<void> {
         await markFailed(taskId, 'Configuration error: LOGGING_BUCKET env var not set');
         return;
       }
+      const bucketName = resourceId.replace('arn:aws:s3:::', '').split('/')[0];
+      if (!bucketName) {
+        await markFailed(taskId, `Rejected: could not extract bucket name from ARN '${resourceId}'`);
+        return;
+      }
       result = await enableS3Logging(s3, bucketName, LOGGING_BUCKET);
     } else {
-      // enable_s3_encryption
-      result = await enableS3Encryption(s3, bucketName);
+      // tag_resource
+      result = await applyTags(resourceId, actionParams!);
     }
 
     if (result.success) {

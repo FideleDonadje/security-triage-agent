@@ -10,7 +10,7 @@ import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
-import { SSM_AGENT_ID, SSM_AGENT_ALIAS } from './agent-stack';
+import { SSM_AGENT_ID, SSM_AGENT_ALIAS, SSM_REQUIRED_TAG_KEYS } from './agent-stack';
 import { Construct } from 'constructs';
 
 export interface SecurityTriageStackProps extends cdk.StackProps {
@@ -20,6 +20,14 @@ export interface SecurityTriageStackProps extends cdk.StackProps {
    * Defaults to localhost only when omitted (local dev).
    */
   frontendUrl?: string;
+
+  /**
+   * Cognito hosted UI domain prefix — must be globally unique in the region.
+   * Defaults to 'security-triage-ops'. Override via CDK context key
+   * `cognitoDomainPrefix` or by passing this prop directly.
+   * Do NOT include the AWS account ID — Cognito domain prefixes are public.
+   */
+  cognitoDomainPrefix?: string;
 }
 
 export class SecurityTriageStack extends cdk.Stack {
@@ -33,6 +41,10 @@ export class SecurityTriageStack extends cdk.Stack {
     super(scope, id, props);
 
     const frontendUrl = props?.frontendUrl;
+    const cognitoDomainPrefix =
+      props?.cognitoDomainPrefix ??
+      (this.node.tryGetContext('cognitoDomainPrefix') as string | undefined) ??
+      'security-triage-ops';
     // Callback URLs: always include localhost for dev; add CloudFront URL when known
     const callbackUrls = ['http://localhost:5173/'];
     const logoutUrls   = ['http://localhost:5173/'];
@@ -63,9 +75,8 @@ export class SecurityTriageStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    // Cognito hosted UI domain — format: https://security-triage-<account>.auth.<region>.amazoncognito.com
     const userPoolDomain = this.userPool.addDomain('CognitoDomain', {
-      cognitoDomain: { domainPrefix: `security-triage-${this.account}` },
+      cognitoDomain: { domainPrefix: cognitoDomainPrefix },
     });
 
     this.userPoolClient = new cognito.UserPoolClient(this, 'AnalystPoolClient', {
@@ -100,6 +111,7 @@ export class SecurityTriageStack extends cdk.Stack {
       stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      timeToLiveAttribute: 'ttl',       // auto-removes completed chat records after 2 hours
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
@@ -190,25 +202,49 @@ export class SecurityTriageStack extends cdk.Stack {
       ],
     }));
 
-    // S3: exactly the two MVP remediation actions + tagging
+    // S3: enable_s3_logging action (read logging config + write + tagging)
     executionLambdaRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'S3RemediationActionsOnly',
+      sid: 'S3LoggingActionOnly',
       effect: iam.Effect.ALLOW,
       actions: [
         's3:GetBucketLocation',
         's3:GetBucketLogging',
         's3:PutBucketLogging',
-        's3:GetEncryptionConfiguration',
-        's3:PutEncryptionConfiguration',
         's3:GetBucketTagging',
         's3:PutBucketTagging',
       ],
       resources: ['arn:aws:s3:::*'],
     }));
 
-    // Explicit deny for all other S3 write actions (defense-in-depth)
+    // ResourceGroupsTaggingAPI: tag_resource action (applies tags to any resource ARN).
+    // tag:TagResources is required, but the Tagging API also delegates to each service's
+    // native tag API — so we must grant those too for every supported resource type.
     executionLambdaRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'DenyAllOtherS3Writes',
+      sid: 'TagResourceAction',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'tag:TagResources',
+        // Native service permissions required by TagResources (S3 covered by S3LoggingActionOnly)
+        'lambda:TagResource',
+        'ec2:CreateTags',
+        'rds:AddTagsToResource',
+      ],
+      resources: ['*'],
+    }));
+
+    // SSM: read required tag keys at cold start
+    executionLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SsmReadRequiredTagKeys',
+      effect: iam.Effect.ALLOW,
+      actions: ['ssm:GetParameter'],
+      resources: [
+        `arn:aws:ssm:${this.region}:${this.account}:parameter${SSM_REQUIRED_TAG_KEYS}`,
+      ],
+    }));
+
+    // Explicit deny for destructive S3 actions (defense-in-depth)
+    executionLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'DenyDestructiveS3Writes',
       effect: iam.Effect.DENY,
       actions: [
         's3:DeleteBucket',
@@ -281,7 +317,9 @@ export class SecurityTriageStack extends cdk.Stack {
       entry: path.join(__dirname, '../../lambda/api/index.ts'),
       handler: 'handler',
       role: apiLambdaRole,
-      timeout: cdk.Duration.seconds(30),
+      // 5-minute timeout supports async worker invocations (Bedrock multi-tool calls).
+      // For API GW-triggered paths the 29-second gateway limit applies regardless.
+      timeout: cdk.Duration.minutes(5),
       memorySize: 512,
       logGroup: apiLambdaLogGroup,
       bundling: {
@@ -300,13 +338,23 @@ export class SecurityTriageStack extends cdk.Stack {
         AGENT_ALIAS_ID_PARAM: SSM_AGENT_ALIAS,
         // CORS: restrict to CloudFront URL; falls back to * for local dev
         ALLOWED_ORIGIN: frontendUrl ?? '*',
+        // Used by handleChat to invoke itself asynchronously
+        FUNCTION_NAME: 'security-triage-api',
       },
     });
+
+    // Allow the API Lambda to invoke itself asynchronously for long-running Bedrock calls
+    apiLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SelfInvokeAsync',
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: [`arn:aws:lambda:${this.region}:${this.account}:function:security-triage-api`],
+    }));
 
     // ── Lambda: Execution (triggered by DynamoDB stream on APPROVED) ───────
     const executionLambda = new lambdaNode.NodejsFunction(this, 'ExecutionLambda', {
       functionName: 'security-triage-execution',
-      description: 'Triggered by DynamoDB stream on APPROVED tasks: enables S3 access logging or S3 default encryption. The only Lambda with S3 write access.',
+      description: 'Triggered by DynamoDB stream on APPROVED tasks: enables S3 access logging or applies resource tags. The only Lambda with write access to AWS resources.',
       runtime: lambda.Runtime.NODEJS_22_X,
       entry: path.join(__dirname, '../../lambda/execution/index.ts'),
       handler: 'handler',
@@ -323,6 +371,7 @@ export class SecurityTriageStack extends cdk.Stack {
         TABLE_NAME: this.taskTable.tableName,
         LOGGING_BUCKET: accessLogsBucket.bucketName,
         REGION: this.region,
+        REQUIRED_TAG_KEYS_PARAM: SSM_REQUIRED_TAG_KEYS,
       },
     });
 
@@ -361,7 +410,7 @@ export class SecurityTriageStack extends cdk.Stack {
       },
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS, // tighten to CloudFront URL post-deploy
-        allowMethods: ['GET', 'POST', 'OPTIONS'],
+        allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
         allowHeaders: ['Content-Type', 'Authorization'],
         maxAge: cdk.Duration.hours(1),
       },
@@ -387,9 +436,12 @@ export class SecurityTriageStack extends cdk.Stack {
       proxy: true,
     });
 
-    // POST /chat
+    // POST /chat  (returns 202 immediately — starts async worker)
+    // GET  /chat/result/{request_id}  (poll for result)
     const chatResource = this.api.root.addResource('chat');
     chatResource.addMethod('POST', lambdaIntegration, authOptions);
+    chatResource.addResource('result').addResource('{request_id}')
+      .addMethod('GET', lambdaIntegration, authOptions);
 
     // GET /tasks  POST /tasks
     const tasksResource = this.api.root.addResource('tasks');
@@ -399,6 +451,7 @@ export class SecurityTriageStack extends cdk.Stack {
     // POST /tasks/{task_id}/approve
     // POST /tasks/{task_id}/reject
     const taskResource = tasksResource.addResource('{task_id}');
+    taskResource.addMethod('DELETE', lambdaIntegration, authOptions);   // dismiss FAILED/REJECTED
     taskResource.addResource('approve').addMethod('POST', lambdaIntegration, authOptions);
     taskResource.addResource('reject').addMethod('POST', lambdaIntegration, authOptions);
 

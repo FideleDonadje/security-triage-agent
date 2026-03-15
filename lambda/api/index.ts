@@ -1,17 +1,25 @@
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { validateToken } from './auth';
-import { handleChat } from './chat';
-import { handleApproveTask, handleGetTasks, handleRejectTask } from './tasks';
+import { handleChat, handleChatResult, handleChatWorker, type ChatWorkerEvent } from './chat';
+import { handleApproveTask, handleDismissTask, handleGetTasks, handleRejectTask } from './tasks';
 
 // Set ALLOWED_ORIGIN env var on this Lambda to your CloudFront URL.
 // Falls back to '*' only when the variable is absent (local dev / CI).
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': process.env.ALLOWED_ORIGIN ?? '*',
   'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+  'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
 };
 
-export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+export const handler = async (
+  event: APIGatewayProxyEvent | ChatWorkerEvent,
+): Promise<APIGatewayProxyResult | void> => {
+  // Async worker invocation — not from API GW, no HTTP context, no JWT needed
+  if ('__chatWorker' in event) {
+    await handleChatWorker(event);
+    return;
+  }
+
   // Handle CORS preflight without auth
   if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 200, headers: CORS_HEADERS, body: '' };
@@ -27,12 +35,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     if (httpMethod === 'POST' && resource === '/chat') {
       response = await handleChat(event, auth);
+    } else if (httpMethod === 'GET' && resource === '/chat/result/{request_id}') {
+      const requestId = event.pathParameters?.request_id ?? '';
+      response = await handleChatResult(requestId);
     } else if (httpMethod === 'GET' && resource === '/tasks') {
       response = await handleGetTasks(event, auth);
     } else if (httpMethod === 'POST' && resource === '/tasks/{task_id}/approve') {
       response = await handleApproveTask(event, auth);
     } else if (httpMethod === 'POST' && resource === '/tasks/{task_id}/reject') {
       response = await handleRejectTask(event, auth);
+    } else if (httpMethod === 'DELETE' && resource === '/tasks/{task_id}') {
+      response = await handleDismissTask(event, auth);
     } else {
       response = {
         statusCode: 404,
