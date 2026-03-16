@@ -11,6 +11,9 @@ cdk.out/
 .env
 .env.local
 .env.*.local
+
+# ── Claude Code — personal settings only, not project config ──────────────────
+.claude/settings.local.json
 *.pem
 *.key
 *.p12
