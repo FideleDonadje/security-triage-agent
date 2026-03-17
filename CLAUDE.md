@@ -13,7 +13,7 @@ context, queues remediation tasks, and executes safe actions after human approva
 - Two autonomous actions only: enable S3 access logging, tag_resource (apply required tags)
 - Real Security Hub findings (no mock data in prod)
 - GuardDuty + CloudTrail enrichment on demand
-- Agent checks Security Hub when chat opens, or when analyst asks
+- Agent greets analyst on chat open, then investigates on demand
 
 ## Out of scope for MVP
 - Email notifications and reply-based approval
@@ -44,7 +44,7 @@ context, queues remediation tasks, and executes safe actions after human approva
 - AWS Bedrock AgentCore — owns the agent loop, memory, tool execution
 - Claude Sonnet on Bedrock
 - Read-only AWS access (Security Hub, GuardDuty, Config, CloudTrail)
-- Write access to DynamoDB only (queue_task tool)
+- Write access to DynamoDB only (queue_task and cancel_task tools)
 - NEVER executes AWS actions directly
 
 ### Execution Lambda
@@ -59,10 +59,9 @@ context, queues remediation tasks, and executes safe actions after human approva
 
 ### Infrastructure
 - AWS CDK (TypeScript)
-- Secrets Manager — Anthropic/Bedrock API key
 - WAF — OWASP rules + rate limiting on API Gateway
 - CloudWatch — 90-day log retention, agent audit trail
-- In the CDK stack — no Secrets Manager secret needed. Bedrock model access is via IAM only. Agent uses bedrock:InvokeModel permission, not an API key.
+- Bedrock model access is via IAM only (bedrock:InvokeModel) — no API key or Secrets Manager secret needed
 
 ---
 
@@ -172,10 +171,8 @@ Default: `["Environment","Owner","Project"]`. Edit the parameter to change the p
 │   └── package.json
 └── .claude/
     ├── settings.json
-    └── skills/
-        ├── aws-security/
-        ├── stack-patterns/
-        └── task-queue/
+    ├── commands/               ← slash commands (/deploy, /scan-secrets, /add-agent-tool, etc.)
+    └── hooks/                  ← pre-commit hooks (secrets scan)
 ```
 
 ---
@@ -185,7 +182,6 @@ Default: `["Environment","Owner","Project"]`. Edit the parameter to change the p
 ```
 CDK_DEFAULT_ACCOUNT     AWS account ID
 CDK_DEFAULT_REGION      Target region (default: us-east-1)
-ANTHROPIC_SECRET_ARN    Secrets Manager ARN for Bedrock key
 USER_POOL_ID            Cognito User Pool ID (post-deploy)
 USER_POOL_CLIENT_ID     Cognito App Client ID (post-deploy)
 ```
@@ -214,15 +210,15 @@ cd frontend && npm run build
 
 ## What good looks like for MVP
 
-Three scenarios must work end to end:
+Six scenarios must work end to end:
 
-1. Analyst opens chat → agent pulls Security Hub findings → returns plain-English
-   summary of most critical finding
-2. Agent queues a task → analyst clicks Approve → S3 change is made → AWS console
-   confirms the change → task shows EXECUTED in queue
-3. Analyst asks "what have you queued?" → agent returns clear summary of pending
-   tasks with rationale
+1. Analyst opens chat → agent greets and lists capabilities → analyst asks about findings → agent returns plain-English summary
+2. Agent queues enable_s3_logging task → analyst approves → S3 logging enabled → task shows EXECUTED
+3. Agent queues tag_resource task → analyst approves → tags applied → task shows EXECUTED
+4. Analyst asks "what have you queued?" → agent returns clear summary of pending tasks with rationale
+5. Agent cancels a PENDING task it queued in error → task moves to CANCELLED
+6. Analyst dismisses a FAILED or REJECTED task → row disappears from activity list
 
-If these three work, MVP is done.
+If all six work, MVP is done.
 
 

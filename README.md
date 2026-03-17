@@ -38,7 +38,7 @@ This agent gives security professionals a conversational interface to their AWS 
 - *"Queue a fix for all unencrypted buckets in the data-lake account."* → agent identifies the non-compliant resources, proposes individual remediation tasks with rationale, and surfaces them in the approval queue.
 - *"What have you queued this week?"* → agent returns a summary of pending, approved, and executed tasks across all findings.
 
-The analyst stays in control. The agent never touches AWS resources — it only proposes. A separate, narrowly-scoped Execution Lambda carries out approved actions, tagging every resource it touches for the audit trail.
+The analyst stays in control. The agent never executes remediation directly — it only proposes. A separate, narrowly-scoped Execution Lambda carries out approved actions, tagging every resource it touches for the audit trail.
 
 In a multi-account environment, Security Hub's aggregated view means the agent works across all member accounts from a single deployment in the delegated administrator account — no per-account setup required.
 
@@ -129,15 +129,15 @@ flowchart TB
 **Key design constraints:**
 - The agent IAM role has **zero write access** to AWS services. Its only write action is `DynamoDB PutItem`.
 - The Execution Lambda runs under a **separate, narrowly-scoped IAM role** — it cannot be invoked directly, only via a DynamoDB stream event where `status = APPROVED`.
-- Every S3 action tags the resource with `security-agent-action: true` and an execution timestamp.
+- Every executed action tags the resource with `security-agent-action: true` and an execution timestamp.
 - No AWS credentials ever reach the browser — all traffic is proxied through the API Lambda.
 
 ---
 
 ## Analyst workflow
 
-1. Analyst opens the chat UI — the agent automatically fetches the latest Security Hub findings and summarises the most critical one.
-2. Analyst asks follow-up questions in plain English: *"What's the blast radius of that finding?"*, *"Queue a fix for the unencrypted buckets."*
+1. Analyst opens the chat UI — the agent introduces itself and lists what it can do.
+2. Analyst asks it to investigate: *"What's the most critical finding right now?"*, *"What's the blast radius of that finding?"*, *"Queue a fix for the buckets missing access logging."*
 3. The agent enriches findings with GuardDuty threat context, Config compliance history, and CloudTrail events, then proposes a remediation task with rationale.
 4. The proposed task appears in the Task Queue panel — action, resource ARN, and plain-English rationale visible.
 5. Analyst clicks **Approve** or **Reject**.
@@ -280,13 +280,6 @@ Tools required on your machine:
 
 Everything else is handled by the deploy script.
 
-Tools required on your machine:
-- AWS CLI v2 (`aws configure` with admin permissions)
-- Node.js 22+
-- AWS CDK CLI: `npm install -g aws-cdk`
-- **Git Bash** (Windows) — all scripts (`deploy.sh`, `deploy-frontend.sh`, `destroy.sh`) are bash scripts.
-  Run them from Git Bash or with `bash ./deploy.sh ...` — they will not work in PowerShell directly.
-
 ---
 
 ## First-time deployment
@@ -415,12 +408,13 @@ cd cdk && cdk import SecurityTriageStack
 
 ## Testing — three MVP scenarios
 
-### Scenario 1 — Agent fetches findings on open
+### Scenario 1 — Agent greeting and first investigation
 
 1. Open the CloudFront URL and log in.
 2. Wait for the chat panel to load.
-3. **Expected:** The agent sends an opening message summarising the most critical
-   active Security Hub findings, in plain English, without you typing anything.
+3. **Expected:** The agent sends a brief greeting introducing itself and listing its capabilities.
+4. Type: *"What are the most critical findings right now?"*
+5. **Expected:** The agent fetches Security Hub findings and returns a plain-English summary by severity.
 
 ### Scenario 2 — Approve a task and verify execution
 
@@ -524,12 +518,14 @@ Verify the role (`security-triage-agentcore`) has:
 }
 ```
 
-### "Failed to fetch" on first request after a long idle
+### "Failed to fetch" on long-running agent requests
 
-Lambda cold starts chaining across API Lambda → AgentCore → Agent Tools Lambda
-can exceed the API Gateway 29-second timeout. This is expected behaviour on a
-lightly-used deployment. The second request in the same session will succeed.
-To mitigate, add an EventBridge rule that pings the API Lambda every 5 minutes.
+The chat endpoint uses an async pattern (POST → 202 → poll) to work around API Gateway's
+29-second timeout. If you still see this error, the most likely cause is a Lambda cold start
+chain (API Lambda → AgentCore → Agent Tools Lambda) on a lightly-used deployment.
+The second request in the same session will succeed. To eliminate cold starts entirely,
+add a Provisioned Concurrency setting to the API Lambda or add an EventBridge rule that
+pings the API Lambda every 5 minutes.
 
 ### Task stays PENDING after approval
 
@@ -555,9 +551,9 @@ cd cdk && cdk deploy SecurityTriageStack
 ## Security architecture
 
 - **The agent has zero write access to AWS services.** Its only write action is `DynamoDB PutItem` to queue a task.
-- **Only the Execution Lambda writes to AWS resources**, and only the two permitted S3 actions.
+- **Only the Execution Lambda writes to AWS resources**, and only the two permitted actions (`enable_s3_logging`, `tag_resource`).
 - **The Execution Lambda is triggered exclusively by a DynamoDB stream event** where `status = APPROVED`. It cannot be invoked directly.
-- **Every S3 action tags the resource** with `security-agent-action: true` and an execution timestamp.
+- **Every executed action tags the resource** with `security-agent-action: true` and an execution timestamp.
 - **No AWS credentials reach the browser.** All traffic is proxied through the API Lambda.
 - **Every API request requires a valid Cognito JWT**, validated by both API Gateway and the Lambda (defence in depth).
 - **PKCE authorization code flow** — no tokens exposed in the browser URL hash.
