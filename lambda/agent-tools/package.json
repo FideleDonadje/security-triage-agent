@@ -19,6 +19,9 @@
     "@aws-sdk/client-dynamodb": "^3.0.0",
     "@aws-sdk/lib-dynamodb": "^3.0.0",
     "@aws-sdk/client-resource-groups-tagging-api": "^3.0.0",
-    "@aws-sdk/client-ssm": "^3.0.0"
+    "@aws-sdk/client-ssm": "^3.0.0",
+    "@aws-sdk/client-cost-explorer": "^3.0.0",
+    "@aws-sdk/client-iam": "^3.0.0",
+    "@aws-sdk/client-accessanalyzer": "^3.0.0"
   }
 }

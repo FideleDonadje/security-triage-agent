@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
 import { sendChat } from '../lib/api';
 
-const INITIAL_MESSAGE = 'check for new security findings';
+const INITIAL_MESSAGE = 'hello';
 
 interface Message {
   id: string;
@@ -20,9 +21,10 @@ export default function Chat() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
+  const [greetCount, setGreetCount] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // Prevent the auto-send from firing more than once
+  // Prevent the auto-send from firing more than once per session
   const autoSentRef = useRef(false);
 
   // Auto-scroll whenever messages or loading state change
@@ -56,12 +58,23 @@ export default function Chat() {
     }
   }, [loading, sessionId, addMessage]);
 
-  // Auto-send the initial findings check when the component mounts
+  // Keep a stable ref to the latest send function to avoid stale closures
+  const sendRef = useRef(send);
+  useEffect(() => { sendRef.current = send; }, [send]);
+
+  // Auto-send the greeting on mount and after each clear
   useEffect(() => {
     if (autoSentRef.current) return;
     autoSentRef.current = true;
-    void send(INITIAL_MESSAGE);
-  }, [send]);
+    void sendRef.current(INITIAL_MESSAGE);
+  }, [greetCount]);
+
+  const handleClear = useCallback(() => {
+    setMessages([]);
+    setSessionId(undefined);
+    autoSentRef.current = false;
+    setGreetCount((n) => n + 1);
+  }, []);
 
   const handleSend = useCallback(() => {
     const text = input.trim();
@@ -82,9 +95,19 @@ export default function Chat() {
       {/* Header */}
       <div style={styles.panelHeader}>
         <span style={styles.panelTitle}>Chat</span>
-        {sessionId && (
-          <span style={styles.sessionBadge} title={sessionId}>Session active</span>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {sessionId && (
+            <span style={styles.sessionBadge} title={sessionId}>Session active</span>
+          )}
+          <button
+            onClick={handleClear}
+            disabled={loading}
+            style={styles.clearBtn}
+            title="Clear chat and start a new session"
+          >
+            Clear
+          </button>
+        </div>
       </div>
 
       {/* Message list */}
@@ -155,16 +178,31 @@ function MessageBubble({ message }: { message: Message }) {
 // ── Message content ────────────────────────────────────────────────────────────
 
 function MessageContent({ content }: { content: string }) {
-  const parts = content.split(/(```[\s\S]*?```)/g);
   return (
-    <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6, fontSize: 14 }}>
-      {parts.map((part, i) => {
-        if (part.startsWith('```')) {
-          const code = part.replace(/^```[^\n]*\n?/, '').replace(/```$/, '');
-          return <pre key={i} style={styles.codeBlock}>{code}</pre>;
-        }
-        return <span key={i}>{part}</span>;
-      })}
+    <div style={styles.markdownBody}>
+      <ReactMarkdown
+        components={{
+          h1: ({ children }) => <h1 style={styles.mdH1}>{children}</h1>,
+          h2: ({ children }) => <h2 style={styles.mdH2}>{children}</h2>,
+          h3: ({ children }) => <h3 style={styles.mdH3}>{children}</h3>,
+          p:  ({ children }) => <p  style={styles.mdP}>{children}</p>,
+          ul: ({ children }) => <ul style={styles.mdUl}>{children}</ul>,
+          ol: ({ children }) => <ol style={styles.mdOl}>{children}</ol>,
+          li: ({ children }) => <li style={styles.mdLi}>{children}</li>,
+          strong: ({ children }) => <strong style={{ color: 'var(--text)', fontWeight: 600 }}>{children}</strong>,
+          code: ({ children, className }) => {
+            const isBlock = className?.startsWith('language-');
+            return isBlock
+              ? <pre style={styles.codeBlock}><code>{children}</code></pre>
+              : <code style={styles.inlineCode}>{children}</code>;
+          },
+          pre: ({ children }) => <>{children}</>,
+          hr: () => <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '10px 0' }} />,
+          a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--blue)' }}>{children}</a>,
+        }}
+      >
+        {content}
+      </ReactMarkdown>
     </div>
   );
 }
@@ -259,6 +297,25 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--muted)',
     marginTop: 6,
   },
+  markdownBody: {
+    fontSize: 14,
+    lineHeight: 1.65,
+  },
+  mdH1: { fontSize: 16, fontWeight: 700, margin: '12px 0 6px', color: 'var(--text)' },
+  mdH2: { fontSize: 15, fontWeight: 600, margin: '10px 0 4px', color: 'var(--text)' },
+  mdH3: { fontSize: 14, fontWeight: 600, margin: '8px 0 4px', color: 'var(--text)' },
+  mdP:  { margin: '4px 0' },
+  mdUl: { margin: '4px 0', paddingLeft: 20 },
+  mdOl: { margin: '4px 0', paddingLeft: 20 },
+  mdLi: { margin: '2px 0' },
+  inlineCode: {
+    background: 'var(--surface2)',
+    border: '1px solid var(--border)',
+    borderRadius: 4,
+    padding: '1px 5px',
+    fontSize: 12,
+    fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+  },
   codeBlock: {
     background: 'var(--surface2)',
     border: '1px solid var(--border)',
@@ -307,6 +364,15 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     padding: '6px 20px',
     borderRadius: 6,
+  },
+  clearBtn: {
+    background: 'transparent',
+    border: '1px solid var(--border)',
+    color: 'var(--muted)',
+    fontSize: 12,
+    padding: '3px 10px',
+    borderRadius: 6,
+    cursor: 'pointer',
   },
   inputHint: {
     fontSize: 11,

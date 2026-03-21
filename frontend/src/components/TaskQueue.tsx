@@ -175,6 +175,9 @@ interface PendingCardProps {
 
 function PendingCard({ task, actionState, onApprove, onReject }: PendingCardProps) {
   const isActioning = !!actionState;
+  const [expanded, setExpanded] = useState(false);
+  const label = resourceLabel(task.resource_id);
+  const isArn = task.resource_id.startsWith('arn:aws:');
 
   return (
     <div style={styles.card}>
@@ -183,8 +186,15 @@ function PendingCard({ task, actionState, onApprove, onReject }: PendingCardProp
         <span style={styles.riskBadge}>Risk: Low</span>
       </div>
 
-      <div style={styles.resource} title={task.resource_id}>
-        {resourceLabel(task.resource_id)}
+      <div
+        style={{ ...styles.resource, ...(isArn ? { cursor: 'pointer' } : {}), ...(expanded ? { whiteSpace: 'normal' as const, overflow: 'visible' } : {}) }}
+        title={expanded ? 'Click to collapse' : task.resource_id}
+        onClick={() => isArn && setExpanded((v) => !v)}
+      >
+        {expanded ? task.resource_id : label}
+        {isArn && !expanded && label !== task.resource_id && (
+          <span style={styles.expandHint}> ↗</span>
+        )}
       </div>
 
       <div style={styles.findingId}>Finding: {task.finding_id}</div>
@@ -226,17 +236,27 @@ function ActivityRow({ task, dismissing, onDismiss }: {
   dismissing: boolean;
   onDismiss: () => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const color = STATUS_COLORS[task.status] ?? 'var(--muted)';
   const isFailed = task.status === 'FAILED';
   const canDismiss = DISMISSIBLE.includes(task.status);
+  const label = resourceLabel(task.resource_id);
+  const isArn = task.resource_id.startsWith('arn:aws:');
   return (
     <div style={{ ...styles.activityRow, flexDirection: 'column', alignItems: 'stretch' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={styles.activityLeft}>
           <span style={{ ...styles.activityStatus, color }}>{task.status}</span>
           <span style={styles.activityAction}>{ACTION_LABELS[task.action] ?? task.action}</span>
-          <span style={styles.activityResource} title={task.resource_id}>
-            {resourceLabel(task.resource_id)}
+          <span
+            style={{ ...styles.activityResource, ...(isArn ? { cursor: 'pointer' } : {}), whiteSpace: expanded ? 'normal' as const : 'nowrap' as const }}
+            title={expanded ? 'Click to collapse' : task.resource_id}
+            onClick={() => isArn && setExpanded((v) => !v)}
+          >
+            {expanded ? task.resource_id : label}
+            {isArn && !expanded && label !== task.resource_id && (
+              <span style={styles.expandHint}> ↗</span>
+            )}
           </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
@@ -411,6 +431,12 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap' as const,
+    wordBreak: 'break-all' as const,
+  },
+  expandHint: {
+    fontSize: 10,
+    color: 'var(--blue)',
+    fontFamily: 'inherit',
   },
   findingId: {
     fontSize: 11,

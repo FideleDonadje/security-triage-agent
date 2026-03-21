@@ -41,6 +41,9 @@ CAPABILITIES:
 - queue_task: Queue a remediation task for analyst approval
 - cancel_task: Cancel a PENDING task you previously queued (if it was queued in error)
 - get_task_queue: View pending, approved, or rejected remediation tasks
+- get_cost_analysis: Analyse AWS spend by service or tag, and detect cost anomalies
+- get_iam_analysis: Analyse IAM posture — MFA gaps, stale access keys, admin users, account summary
+- get_access_analyzer: List IAM Access Analyzer findings for resources with external or cross-account access
 
 RULES — never violate these:
 1. You are READ-ONLY for all AWS services. Your only write actions are queue_task and cancel_task.
@@ -229,6 +232,52 @@ export class AgentStack extends cdk.Stack {
         sid: 'TaggingAPIReadOnly',
         effect: iam.Effect.ALLOW,
         actions: ['tag:GetResources', 'tag:GetTagKeys', 'tag:GetTagValues'],
+        resources: ['*'],
+      }),
+    );
+
+    // Cost Explorer: read-only (get_cost_analysis tool)
+    // Cost Explorer is a global service — IAM resource must be '*'
+    agentToolsLambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'CostExplorerReadOnly',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'ce:GetCostAndUsage',
+          'ce:GetAnomalies',
+          'ce:GetAnomalyMonitors',
+          'ce:GetDimensionValues',
+          'ce:GetTags',
+        ],
+        resources: ['*'],
+      }),
+    );
+
+    // IAM: read-only (get_iam_analysis tool)
+    agentToolsLambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'IamReadOnly',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'iam:GetAccountSummary',
+          'iam:GenerateCredentialReport',
+          'iam:GetCredentialReport',
+          'iam:ListUsers',
+          'iam:ListAttachedUserPolicies',
+        ],
+        resources: ['*'],
+      }),
+    );
+
+    // Access Analyzer: read-only (get_access_analyzer tool)
+    agentToolsLambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'AccessAnalyzerReadOnly',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'access-analyzer:ListAnalyzers',
+          'access-analyzer:ListFindings',
+        ],
         resources: ['*'],
       }),
     );
@@ -465,6 +514,72 @@ export class AgentStack extends cdk.Stack {
                   },
                 },
               },
+              {
+                name: 'get_iam_analysis',
+                description:
+                  'Analyse the IAM security posture of the account. Use when the analyst asks about MFA, access keys, admin users, or overall IAM health.',
+                parameters: {
+                  query_type: {
+                    type: 'string',
+                    description: '"summary" — account-level IAM stats. "mfa_gaps" — console users without MFA. "key_rotation" — active access keys older than 90 days. "admin_users" — users with AdministratorAccess. "credential_report" — full credential report for all users.',
+                    required: false,
+                  },
+                },
+              },
+              {
+                name: 'get_access_analyzer',
+                description:
+                  'List IAM Access Analyzer findings — resources accessible from outside the account (public S3 buckets, cross-account IAM roles, KMS keys, etc.). Use when the analyst asks about external exposure or public resource access.',
+                parameters: {
+                  status: {
+                    type: 'string',
+                    description: 'Finding status filter: ACTIVE (default), ARCHIVED, or RESOLVED.',
+                    required: false,
+                  },
+                  resource_type: {
+                    type: 'string',
+                    description: 'Filter by resource type, e.g. AWS::S3::Bucket, AWS::IAM::Role, AWS::KMS::Key. Omit to return all types.',
+                    required: false,
+                  },
+                },
+              },
+              {
+                name: 'get_cost_analysis',
+                description:
+                  'Analyse AWS costs and detect anomalies. Use when the analyst asks about spend, billing, cost breakdown by service or tag, or unusual charges. Cost Explorer only reflects costs from the previous day onward — it is not real-time.',
+                parameters: {
+                  query_type: {
+                    type: 'string',
+                    description: 'Type of cost query: "summary" (total spend by service), "services" (same as summary, grouped by service), "tags" (spend filtered/grouped by a specific tag key), or "anomalies" (detected cost spikes). Defaults to "summary".',
+                    required: false,
+                  },
+                  tag_key: {
+                    type: 'string',
+                    description: 'Tag key to group or filter costs by (e.g. "Project", "Environment"). Required when query_type is "tags".',
+                    required: false,
+                  },
+                  tag_value: {
+                    type: 'string',
+                    description: 'Tag value to filter costs by (e.g. "security-triage-agent"). Optional — omit to see all values for the tag_key.',
+                    required: false,
+                  },
+                  start_date: {
+                    type: 'string',
+                    description: 'Start date in YYYY-MM-DD format. Defaults to 30 days ago.',
+                    required: false,
+                  },
+                  end_date: {
+                    type: 'string',
+                    description: 'End date in YYYY-MM-DD format. Defaults to today.',
+                    required: false,
+                  },
+                  granularity: {
+                    type: 'string',
+                    description: 'Time granularity: DAILY or MONTHLY. Defaults to MONTHLY.',
+                    required: false,
+                  },
+                },
+              },
             ],
           },
         },
@@ -542,7 +657,7 @@ export class AgentStack extends cdk.Stack {
       properties: {
         agentId: agent.attrAgentId,
         foundationModel: FOUNDATION_MODEL,
-        configVersion: '4',
+        configVersion: '5',
       },
     });
 

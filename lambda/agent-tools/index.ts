@@ -29,6 +29,27 @@ import {
   GetResourcesCommand,
 } from '@aws-sdk/client-resource-groups-tagging-api';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+import {
+  CostExplorerClient,
+  GetCostAndUsageCommand,
+  GetAnomaliesCommand,
+  GetAnomalyMonitorsCommand,
+  Granularity,
+  GroupDefinitionType,
+} from '@aws-sdk/client-cost-explorer';
+import {
+  IAMClient,
+  GetAccountSummaryCommand,
+  GenerateCredentialReportCommand,
+  GetCredentialReportCommand,
+  ListUsersCommand,
+  ListAttachedUserPoliciesCommand,
+} from '@aws-sdk/client-iam';
+import {
+  AccessAnalyzerClient,
+  ListAnalyzersCommand,
+  ListFindingsCommand as AAListFindingsCommand,
+} from '@aws-sdk/client-accessanalyzer';
 import { randomUUID } from 'crypto';
 
 // ── AWS Clients ──────────────────────────────────────────────────────────────
@@ -41,6 +62,10 @@ const configService = new ConfigServiceClient({ region: REGION });
 const cloudTrail = new CloudTrailClient({ region: REGION });
 const tagging = new ResourceGroupsTaggingAPIClient({ region: REGION });
 const ssmClient = new SSMClient({ region: REGION });
+// Cost Explorer and IAM are global services — endpoint is always us-east-1
+const costExplorer = new CostExplorerClient({ region: 'us-east-1' });
+const iamClient = new IAMClient({ region: 'us-east-1' });
+const accessAnalyzer = new AccessAnalyzerClient({ region: REGION });
 const ddb = DynamoDBDocumentClient.from(
   new DynamoDBClient({ region: REGION }),
   { marshallOptions: { removeUndefinedValues: true } },
@@ -128,6 +153,15 @@ export const handler = async (event: BedrockAgentEvent): Promise<BedrockAgentRes
         break;
       case 'get_task_queue':
         resultText = await getTaskQueue(params);
+        break;
+      case 'get_cost_analysis':
+        resultText = await getCostAnalysis(params);
+        break;
+      case 'get_iam_analysis':
+        resultText = await getIamAnalysis(params);
+        break;
+      case 'get_access_analyzer':
+        resultText = await getAccessAnalyzer(params);
         break;
       default:
         resultText = `Unknown function: ${event.function}`;
@@ -675,6 +709,262 @@ async function getTaskQueue(params: Record<string, string>): Promise<string> {
   }
 
   return JSON.stringify({ count: tasks.length, status, tasks }, null, 2);
+}
+
+// ── Tool: get_cost_analysis ───────────────────────────────────────────────────
+
+type CostQueryType = 'services' | 'tags' | 'anomalies' | 'summary';
+
+async function getCostAnalysis(params: Record<string, string>): Promise<string> {
+  const queryType = (params.query_type ?? 'summary') as CostQueryType;
+  const granularity = (params.granularity?.toUpperCase() ?? 'MONTHLY') as Granularity;
+
+  // Default: last 30 days (or last full month for MONTHLY)
+  const now = new Date();
+  const defaultStart = new Date(now);
+  defaultStart.setDate(defaultStart.getDate() - 30);
+  const start = params.start_date ?? defaultStart.toISOString().slice(0, 10);
+  const end   = params.end_date   ?? now.toISOString().slice(0, 10);
+
+  if (queryType === 'anomalies') {
+    // Get anomaly monitors first (needed to query anomalies)
+    const monitorsRes = await costExplorer.send(new GetAnomalyMonitorsCommand({}));
+    const monitors = monitorsRes.AnomalyMonitors ?? [];
+
+    if (monitors.length === 0) {
+      return 'No Cost Anomaly monitors are configured. Enable AWS Cost Anomaly Detection in the Cost Management console to use this feature.';
+    }
+
+    const anomaliesRes = await costExplorer.send(new GetAnomaliesCommand({
+      DateInterval: { StartDate: start, EndDate: end },
+      MonitorArn: monitors[0].MonitorArn,
+      MaxResults: 20,
+    }));
+
+    const anomalies = anomaliesRes.Anomalies ?? [];
+    if (anomalies.length === 0) return `No cost anomalies detected between ${start} and ${end}.`;
+
+    return JSON.stringify({
+      period: { start, end },
+      anomaly_count: anomalies.length,
+      anomalies: anomalies.map(a => ({
+        anomaly_id: a.AnomalyId,
+        service: a.RootCauses?.[0]?.Service ?? 'Unknown',
+        region: a.RootCauses?.[0]?.Region ?? 'Unknown',
+        total_impact:        `$${(a.Impact?.TotalImpact ?? 0).toFixed(2)}`,
+        total_impact_pct:    `${(a.Impact?.TotalImpactPercentage ?? 0).toFixed(1)}%`,
+        max_impact:          `$${(a.Impact?.MaxImpact ?? 0).toFixed(2)}`,
+        severity: a.AnomalyScore?.MaxScore !== undefined
+          ? (a.AnomalyScore.MaxScore > 80 ? 'HIGH' : a.AnomalyScore.MaxScore > 40 ? 'MEDIUM' : 'LOW')
+          : 'UNKNOWN',
+        start_date: a.AnomalyStartDate,
+        end_date: a.AnomalyEndDate ?? 'ongoing',
+      })),
+    }, null, 2);
+  }
+
+  // Build GroupBy for services or tags
+  const groupBy = queryType === 'tags' && params.tag_key
+    ? [{ Type: GroupDefinitionType.TAG, Key: params.tag_key }]
+    : [{ Type: GroupDefinitionType.DIMENSION, Key: 'SERVICE' }];
+
+  // Build filter for tag-scoped queries
+  const filter = queryType === 'tags' && params.tag_key && params.tag_value
+    ? { Tags: { Key: params.tag_key, Values: [params.tag_value] } }
+    : undefined;
+
+  const res = await costExplorer.send(new GetCostAndUsageCommand({
+    TimePeriod: { Start: start, End: end },
+    Granularity: granularity,
+    Metrics: ['UnblendedCost'],
+    GroupBy: groupBy,
+    ...(filter && { Filter: filter }),
+  }));
+
+  const results = res.ResultsByTime ?? [];
+
+  // Aggregate totals across all time periods
+  const totals: Record<string, number> = {};
+  let grandTotal = 0;
+
+  for (const period of results) {
+    for (const group of period.Groups ?? []) {
+      const key   = group.Keys?.[0] ?? 'Unknown';
+      const cost  = parseFloat(group.Metrics?.UnblendedCost?.Amount ?? '0');
+      totals[key] = (totals[key] ?? 0) + cost;
+      grandTotal += cost;
+    }
+  }
+
+  const sorted = Object.entries(totals)
+    .sort(([, a], [, b]) => b - a)
+    .map(([name, cost]) => ({
+      [queryType === 'tags' ? 'tag_value' : 'service']: name,
+      cost: `$${cost.toFixed(2)}`,
+      percent: grandTotal > 0 ? `${((cost / grandTotal) * 100).toFixed(1)}%` : '0%',
+    }));
+
+  return JSON.stringify({
+    period: { start, end, granularity },
+    query_type: queryType,
+    ...(queryType === 'tags' && params.tag_key && { tag_key: params.tag_key }),
+    ...(params.tag_value && { tag_value: params.tag_value }),
+    grand_total: `$${grandTotal.toFixed(2)}`,
+    breakdown: sorted,
+  }, null, 2);
+}
+
+// ── Tool: get_iam_analysis ────────────────────────────────────────────────────
+
+async function getIamAnalysis(params: Record<string, string>): Promise<string> {
+  const queryType = params.query_type ?? 'summary';
+
+  // Account-level summary
+  if (queryType === 'summary') {
+    const summary = await iamClient.send(new GetAccountSummaryCommand({}));
+    const m = summary.SummaryMap ?? {};
+    return JSON.stringify({
+      users:               m['Users'],
+      groups:              m['Groups'],
+      roles:               m['Roles'],
+      policies:            m['Policies'],
+      mfa_devices:         m['MFADevices'],
+      mfa_devices_in_use:  m['MFADevicesInUse'],
+      access_keys_present: m['AccountAccessKeysPresent'],
+      account_mfa_enabled: m['AccountMFAEnabled'] === 1,
+      signing_certs:       m['AccountSigningCertificatesPresent'],
+    }, null, 2);
+  }
+
+  // Credential report — covers MFA gaps and key rotation
+  if (queryType === 'mfa_gaps' || queryType === 'key_rotation' || queryType === 'credential_report') {
+    // GenerateCredentialReport is async — keep retrying until COMPLETE
+    let state = 'STARTED';
+    for (let attempt = 0; attempt < 6 && state !== 'COMPLETE'; attempt++) {
+      const gen = await iamClient.send(new GenerateCredentialReportCommand({}));
+      state = gen.State ?? 'STARTED';
+      if (state !== 'COMPLETE') await new Promise(r => setTimeout(r, 2000));
+    }
+
+    const report = await iamClient.send(new GetCredentialReportCommand({}));
+    const csv = Buffer.from(report.Content ?? '').toString('utf-8');
+    const lines = csv.split('\n').filter(Boolean);
+    const headers = lines[0].split(',');
+
+    const col = (row: string[], name: string) => row[headers.indexOf(name)] ?? '';
+
+    const users = lines.slice(1).map(line => {
+      const row = line.split(',');
+      const keyAge = (dateStr: string) => {
+        if (!dateStr || dateStr === 'N/A' || dateStr === 'not_supported') return null;
+        return Math.floor((Date.now() - new Date(dateStr).getTime()) / 86_400_000);
+      };
+      return {
+        user:              col(row, 'user'),
+        mfa_active:        col(row, 'mfa_active') === 'true',
+        password_enabled:  col(row, 'password_enabled') === 'true',
+        password_last_used: col(row, 'password_last_used'),
+        key1_active:       col(row, 'access_key_1_active') === 'true',
+        key1_age_days:     keyAge(col(row, 'access_key_1_last_rotated')),
+        key2_active:       col(row, 'access_key_2_active') === 'true',
+        key2_age_days:     keyAge(col(row, 'access_key_2_last_rotated')),
+      };
+    });
+
+    if (queryType === 'mfa_gaps') {
+      const gaps = users.filter(u => u.password_enabled && !u.mfa_active);
+      return gaps.length === 0
+        ? 'All console users have MFA enabled.'
+        : JSON.stringify({ mfa_gap_count: gaps.length, users_without_mfa: gaps.map(u => u.user) }, null, 2);
+    }
+
+    if (queryType === 'key_rotation') {
+      const stale = users.flatMap(u => {
+        const results = [];
+        if (u.key1_active && u.key1_age_days !== null && u.key1_age_days > 90)
+          results.push({ user: u.user, key: 'key1', age_days: u.key1_age_days });
+        if (u.key2_active && u.key2_age_days !== null && u.key2_age_days > 90)
+          results.push({ user: u.user, key: 'key2', age_days: u.key2_age_days });
+        return results;
+      });
+      return stale.length === 0
+        ? 'All active access keys have been rotated within 90 days.'
+        : JSON.stringify({ stale_key_count: stale.length, stale_keys: stale }, null, 2);
+    }
+
+    // Full credential report
+    return JSON.stringify({ user_count: users.length, users }, null, 2);
+  }
+
+  // Admin users — check for directly attached AdministratorAccess policy
+  if (queryType === 'admin_users') {
+    const usersRes = await iamClient.send(new ListUsersCommand({ MaxItems: 100 }));
+    const admins: string[] = [];
+    for (const user of usersRes.Users ?? []) {
+      const policies = await iamClient.send(new ListAttachedUserPoliciesCommand({ UserName: user.UserName }));
+      if (policies.AttachedPolicies?.some((p: { PolicyName?: string }) => p.PolicyName === 'AdministratorAccess')) {
+        admins.push(user.UserName ?? '');
+      }
+    }
+    return admins.length === 0
+      ? 'No users have AdministratorAccess directly attached.'
+      : JSON.stringify({ admin_user_count: admins.length, admin_users: admins }, null, 2);
+  }
+
+  return `Unknown query_type '${queryType}'. Valid values: summary, mfa_gaps, key_rotation, credential_report, admin_users.`;
+}
+
+// ── Tool: get_access_analyzer ─────────────────────────────────────────────────
+
+async function getAccessAnalyzer(params: Record<string, string>): Promise<string> {
+  const status      = (params.status?.toUpperCase() ?? 'ACTIVE') as 'ACTIVE' | 'ARCHIVED' | 'RESOLVED';
+  const resourceType = params.resource_type;
+
+  const analyzersRes = await accessAnalyzer.send(new ListAnalyzersCommand({}));
+  const analyzers = analyzersRes.analyzers ?? [];
+
+  if (analyzers.length === 0) {
+    return 'No IAM Access Analyzers are configured. Enable Access Analyzer in the IAM console (Access Analyzer → Create analyzer) to use this feature.';
+  }
+
+  const allFindings: unknown[] = [];
+
+  for (const analyzer of analyzers) {
+    const res = await accessAnalyzer.send(new AAListFindingsCommand({
+      analyzerArn: analyzer.arn,
+      filter: {
+        status: { eq: [status] },
+        ...(resourceType && { resourceType: { eq: [resourceType] } }),
+      },
+      maxResults: 50,
+    }));
+
+    for (const f of res.findings ?? []) {
+      allFindings.push({
+        id:            f.id,
+        resource:      f.resource,
+        resource_type: f.resourceType,
+        action:        f.action,
+        principal:     f.principal,
+        condition:     f.condition,
+        status:        f.status,
+        is_public:     f.isPublic,
+        created_at:    f.createdAt,
+        analyzer:      analyzer.name,
+      });
+    }
+  }
+
+  if (allFindings.length === 0) {
+    return `No ${status.toLowerCase()} Access Analyzer findings${resourceType ? ` for resource type ${resourceType}` : ''}.`;
+  }
+
+  return JSON.stringify({
+    analyzer_count: analyzers.length,
+    finding_count:  allFindings.length,
+    status_filter:  status,
+    findings:       allFindings,
+  }, null, 2);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
