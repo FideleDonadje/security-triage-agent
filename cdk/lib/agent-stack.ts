@@ -1,3 +1,29 @@
+/**
+ * agent-stack.ts — Bedrock Agent, action group Lambda, and IAM wiring
+ *
+ * Deploys the AI agent that analysts chat with. Responsibilities:
+ *   - Creates the Bedrock Agent (Claude Sonnet) with a system prompt defining
+ *     its role, available tools, and rules (read-only except queue_task)
+ *   - Deploys the action group Lambda (security-triage-agent-tools) that
+ *     executes all agent tools: get_findings, get_threat_context, get_config_status,
+ *     get_trail_events, get_tag_compliance, get_compliance_report, queue_task,
+ *     cancel_task, get_task_queue, get_iam_analysis, get_access_analyzer, get_cost_analysis
+ *   - Wires IAM: agent role trusts Bedrock; tools Lambda has read-only access to
+ *     SecurityHub, GuardDuty, Config, CloudTrail + DynamoDB PutItem for queue_task
+ *   - Auto-prepares the agent on every deploy via a Custom Resource Lambda
+ *   - Writes agent ID and alias ID to SSM so the API Lambda can invoke the agent
+ *     without a hard cross-stack CloudFormation dependency
+ *
+ * ARCHITECTURE RULE: the agent tools Lambda has ZERO write access to AWS services.
+ * Its only write action is DynamoDB PutItem (queue_task) and UpdateItem (cancel_task).
+ * All real remediation happens in the Execution Lambda (security-triage-stack.ts).
+ *
+ * SSM outputs (read by API Lambda at cold start):
+ *   /security-triage/agent-id        — Bedrock Agent ID
+ *   /security-triage/agent-alias-id  — prod alias ID
+ *   /security-triage/required-tag-keys — JSON array, editable without redeployment
+ */
+
 import * as path from 'path';
 import * as cdk from 'aws-cdk-lib';
 import * as bedrock from 'aws-cdk-lib/aws-bedrock';
@@ -97,9 +123,18 @@ export class AgentStack extends cdk.Stack {
 
     // ── Bedrock Agent Service Role ─────────────────────────────────────────
     // Trusted by Bedrock to invoke the foundation model and invoke the action group Lambda.
+    // AWS documentation requires the trust policy to include aws:SourceAccount and
+    // aws:SourceArn conditions — without them Bedrock rejects the role during PrepareAgent.
     this.agentRole = new iam.Role(this, 'AgentCoreRole', {
       roleName: 'security-triage-agentcore',
-      assumedBy: new iam.ServicePrincipal('bedrock.amazonaws.com'),
+      assumedBy: new iam.ServicePrincipal('bedrock.amazonaws.com', {
+        conditions: {
+          StringEquals: { 'aws:SourceAccount': this.account },
+          ArnLike: {
+            'aws:SourceArn': `arn:aws:bedrock:${this.region}:${this.account}:agent/*`,
+          },
+        },
+      }),
       description:
         'Bedrock Agent service role - invokes foundation model and action group Lambda',
     });
@@ -138,6 +173,19 @@ export class AgentStack extends cdk.Stack {
         resources: [
           agentLogGroup.logGroupArn,
           `${agentLogGroup.logGroupArn}:*`,
+        ],
+      }),
+    );
+
+    // Lambda: invoke the action group Lambda (agent role is used by Bedrock to call it)
+    // Both this IAM permission AND the Lambda resource-based policy are required.
+    this.agentRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'InvokeActionGroupLambda',
+        effect: iam.Effect.ALLOW,
+        actions: ['lambda:InvokeFunction'],
+        resources: [
+          `arn:aws:lambda:${this.region}:${this.account}:function:security-triage-agent-tools`,
         ],
       }),
     );
@@ -309,6 +357,7 @@ export class AgentStack extends cdk.Stack {
       functionName: 'security-triage-agent-tools',
       description: 'Bedrock Agent action group: executes the 6 agent tools (get_findings, get_threat_context, get_config_status, get_trail_events, queue_task, get_task_queue). Read-only except DynamoDB PutItem.',
       runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.ARM_64,
       entry: path.join(__dirname, '../../lambda/agent-tools/index.ts'),
       handler: 'handler',
       role: agentToolsLambdaRole,
@@ -328,11 +377,14 @@ export class AgentStack extends cdk.Stack {
       },
     });
 
-    // Allow Bedrock to invoke the action group Lambda
+    // Allow Bedrock to invoke the action group Lambda.
+    // AWS docs require BOTH sourceAccount (prevents confused deputy) and sourceArn.
+    // PrepareAgent validates this resource-based policy exists before marking the agent PREPARED.
     agentToolsLambda.addPermission('BedrockInvokePermission', {
       principal: new iam.ServicePrincipal('bedrock.amazonaws.com'),
       action: 'lambda:InvokeFunction',
       sourceAccount: this.account,
+      sourceArn: `arn:aws:bedrock:${this.region}:${this.account}:agent/*`,
     });
 
     // ── Bedrock Agent ──────────────────────────────────────────────────────
@@ -342,12 +394,13 @@ export class AgentStack extends cdk.Stack {
       foundationModel: FOUNDATION_MODEL,
       instruction: SYSTEM_PROMPT,
       idleSessionTtlInSeconds: 1800, // 30 minutes
+      // Default quota: 10 functions per action group. 13 total → split into two groups.
+      // Both groups invoke the same Lambda; the handler routes on function name.
       actionGroups: [
         {
-          actionGroupName: 'security-triage-tools',
-          actionGroupExecutor: {
-            lambda: agentToolsLambda.functionArn,
-          },
+          // Group 1 — investigation tools (10 functions, at the default limit)
+          actionGroupName: 'security-triage-investigate',
+          actionGroupExecutor: { lambda: agentToolsLambda.functionArn },
           functionSchema: {
             functions: [
               {
@@ -421,7 +474,7 @@ export class AgentStack extends cdk.Stack {
               {
                 name: 'get_tag_compliance',
                 description:
-                  'Find resources that are missing required tags (Environment, Owner, Project). Returns each resource\'s ARN, existing tags, and which required tags are absent. Use the existing tags on sibling resources to infer what values to propose.',
+                  'Find resources missing required tags (Environment, Owner, Project). Returns each resource ARN, existing tags, and which required tags are absent. Use existing tags on sibling resources to infer values to propose.',
                 parameters: {
                   resource_type: {
                     type: 'string',
@@ -435,6 +488,93 @@ export class AgentStack extends cdk.Stack {
                   },
                 },
               },
+              {
+                name: 'get_enabled_standards',
+                description:
+                  'List the Security Hub compliance standards currently enabled in this account (e.g. NIST SP 800-53, CIS, FSBP, PCI DSS). Always call this before get_compliance_report to confirm a standard is active.',
+              },
+              {
+                name: 'get_compliance_report',
+                description:
+                  'Generate a compliance posture report for a specific Security Hub standard. Returns control counts by severity, number of active failing findings, and the top failing control families. Use get_enabled_standards first to confirm the standard is enabled.',
+                parameters: {
+                  standard_name: {
+                    type: 'string',
+                    description: 'The standard to report on. Use a short name like "nist-800-53", "cis", "fsbp", or "pci". Partial matches are supported.',
+                    required: true,
+                  },
+                },
+              },
+              {
+                name: 'get_iam_analysis',
+                description:
+                  'Analyse the IAM security posture of the account. Use when the analyst asks about MFA, access keys, admin users, or overall IAM health.',
+                parameters: {
+                  query_type: {
+                    type: 'string',
+                    description: '"summary": account-level IAM stats. "mfa_gaps": console users without MFA. "key_rotation": active access keys older than 90 days. "admin_users": users with AdministratorAccess. "credential_report": full credential report for all users.',
+                    required: false,
+                  },
+                },
+              },
+              {
+                name: 'get_access_analyzer',
+                description:
+                  'List IAM Access Analyzer findings for resources accessible from outside the account (public S3 buckets, cross-account IAM roles, KMS keys). Use when the analyst asks about external exposure or public resource access.',
+                parameters: {
+                  status: {
+                    type: 'string',
+                    description: 'Finding status filter: ACTIVE (default), ARCHIVED, or RESOLVED.',
+                    required: false,
+                  },
+                  resource_type: {
+                    type: 'string',
+                    description: 'Filter by resource type, e.g. AWS::S3::Bucket, AWS::IAM::Role, AWS::KMS::Key. Omit to return all types.',
+                    required: false,
+                  },
+                },
+              },
+              {
+                name: 'get_cost_analysis',
+                description:
+                  'Analyse AWS costs and detect anomalies. Use when the analyst asks about spend, billing, cost breakdown by service or tag, or unusual charges. Cost Explorer only reflects costs from the previous day onward - not real-time.',
+                parameters: {
+                  query_type: {
+                    type: 'string',
+                    description: 'Type of cost query: "summary" (total spend by service), "tags" (spend grouped by a tag key), or "anomalies" (detected cost spikes). Defaults to "summary".',
+                    required: false,
+                  },
+                  tag_key: {
+                    type: 'string',
+                    description: 'Tag key to group or filter costs by (e.g. "Project", "Environment"). Required when query_type is "tags".',
+                    required: false,
+                  },
+                  tag_value: {
+                    type: 'string',
+                    description: 'Tag value to filter costs by. Optional - omit to see all values for the tag_key.',
+                    required: false,
+                  },
+                  start_date: {
+                    type: 'string',
+                    description: 'Start date in YYYY-MM-DD format. Defaults to 30 days ago.',
+                    required: false,
+                  },
+                  end_date: {
+                    type: 'string',
+                    description: 'End date in YYYY-MM-DD format. Defaults to today.',
+                    required: false,
+                  },
+                },
+              },
+            ],
+          },
+        },
+        {
+          // Group 2 — task management tools (3 functions)
+          actionGroupName: 'security-triage-manage',
+          actionGroupExecutor: { lambda: agentToolsLambda.functionArn },
+          functionSchema: {
+            functions: [
               {
                 name: 'queue_task',
                 description:
@@ -462,33 +602,15 @@ export class AgentStack extends cdk.Stack {
                   },
                   action_params: {
                     type: 'string',
-                    description: 'Required for tag_resource: JSON object of tag key-value pairs to apply (e.g. {"Environment":"prod","Owner":"team-security","Project":"payments"}). Infer values from resource name and existing tags on sibling resources.',
+                    description: 'Required for tag_resource: JSON object of tag key-value pairs to apply (e.g. {"Environment":"prod","Owner":"security","Project":"payments"}). Infer values from resource name and existing tags on sibling resources.',
                     required: false,
-                  },
-                },
-              },
-              {
-                name: 'get_enabled_standards',
-                description:
-                  'List the Security Hub compliance standards currently enabled in this account (e.g. NIST SP 800-53, CIS, FSBP, PCI DSS). Always call this before get_compliance_report to confirm a standard is active.',
-                parameters: {},
-              },
-              {
-                name: 'get_compliance_report',
-                description:
-                  'Generate a compliance posture report for a specific Security Hub standard. Returns control counts by severity, number of active failing findings, and the top failing control families. Use get_enabled_standards first to confirm the standard is enabled.',
-                parameters: {
-                  standard_name: {
-                    type: 'string',
-                    description: 'The standard to report on. Use a short name like "nist-800-53", "cis", "fsbp", or "pci". Partial matches are supported.',
-                    required: true,
                   },
                 },
               },
               {
                 name: 'cancel_task',
                 description:
-                  'Cancel a PENDING task that you queued in error. Only works on PENDING tasks — cannot undo APPROVED or EXECUTED tasks.',
+                  'Cancel a PENDING task that you queued in error. Only works on PENDING tasks - cannot undo APPROVED or EXECUTED tasks.',
                 parameters: {
                   task_id: {
                     type: 'string',
@@ -510,72 +632,6 @@ export class AgentStack extends cdk.Stack {
                   status: {
                     type: 'string',
                     description: 'Filter by task status: PENDING, APPROVED, REJECTED, EXECUTED, or FAILED. Defaults to PENDING.',
-                    required: false,
-                  },
-                },
-              },
-              {
-                name: 'get_iam_analysis',
-                description:
-                  'Analyse the IAM security posture of the account. Use when the analyst asks about MFA, access keys, admin users, or overall IAM health.',
-                parameters: {
-                  query_type: {
-                    type: 'string',
-                    description: '"summary" — account-level IAM stats. "mfa_gaps" — console users without MFA. "key_rotation" — active access keys older than 90 days. "admin_users" — users with AdministratorAccess. "credential_report" — full credential report for all users.',
-                    required: false,
-                  },
-                },
-              },
-              {
-                name: 'get_access_analyzer',
-                description:
-                  'List IAM Access Analyzer findings — resources accessible from outside the account (public S3 buckets, cross-account IAM roles, KMS keys, etc.). Use when the analyst asks about external exposure or public resource access.',
-                parameters: {
-                  status: {
-                    type: 'string',
-                    description: 'Finding status filter: ACTIVE (default), ARCHIVED, or RESOLVED.',
-                    required: false,
-                  },
-                  resource_type: {
-                    type: 'string',
-                    description: 'Filter by resource type, e.g. AWS::S3::Bucket, AWS::IAM::Role, AWS::KMS::Key. Omit to return all types.',
-                    required: false,
-                  },
-                },
-              },
-              {
-                name: 'get_cost_analysis',
-                description:
-                  'Analyse AWS costs and detect anomalies. Use when the analyst asks about spend, billing, cost breakdown by service or tag, or unusual charges. Cost Explorer only reflects costs from the previous day onward — it is not real-time.',
-                parameters: {
-                  query_type: {
-                    type: 'string',
-                    description: 'Type of cost query: "summary" (total spend by service), "services" (same as summary, grouped by service), "tags" (spend filtered/grouped by a specific tag key), or "anomalies" (detected cost spikes). Defaults to "summary".',
-                    required: false,
-                  },
-                  tag_key: {
-                    type: 'string',
-                    description: 'Tag key to group or filter costs by (e.g. "Project", "Environment"). Required when query_type is "tags".',
-                    required: false,
-                  },
-                  tag_value: {
-                    type: 'string',
-                    description: 'Tag value to filter costs by (e.g. "security-triage-agent"). Optional — omit to see all values for the tag_key.',
-                    required: false,
-                  },
-                  start_date: {
-                    type: 'string',
-                    description: 'Start date in YYYY-MM-DD format. Defaults to 30 days ago.',
-                    required: false,
-                  },
-                  end_date: {
-                    type: 'string',
-                    description: 'End date in YYYY-MM-DD format. Defaults to today.',
-                    required: false,
-                  },
-                  granularity: {
-                    type: 'string',
-                    description: 'Time granularity: DAILY or MONTHLY. Defaults to MONTHLY.',
                     required: false,
                   },
                 },
@@ -641,6 +697,7 @@ export class AgentStack extends cdk.Stack {
       entry: path.join(__dirname, '../../lambda/agent-prepare/index.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.ARM_64,
       role: agentPrepareRole,
       timeout: cdk.Duration.minutes(10),
       bundling: { minify: true, sourceMap: false, externalModules: [] },
@@ -652,14 +709,20 @@ export class AgentStack extends cdk.Stack {
 
     // Changing foundationModel or configVersion triggers a re-run on deploy.
     // Bump configVersion manually when you change the instruction or action groups.
-    new cdk.CustomResource(this, 'AgentPrepareResource', {
+    const agentPrepareResource = new cdk.CustomResource(this, 'AgentPrepareResource', {
       serviceToken: agentPrepareProvider.serviceToken,
       properties: {
         agentId: agent.attrAgentId,
         foundationModel: FOUNDATION_MODEL,
-        configVersion: '5',
+        configVersion: '9',
       },
     });
+
+    // The alias must be created AFTER the agent is prepared. Without this dependency,
+    // CloudFormation creates the alias in parallel with the prepare custom resource.
+    // CfnAgentAlias auto-triggers PrepareAgent during creation — if the agent is not
+    // yet prepared (or preparation fails), the alias creation fails too.
+    agentAlias.node.addDependency(agentPrepareResource);
 
     // ── CDK Outputs ────────────────────────────────────────────────────────
     new cdk.CfnOutput(this, 'AgentId', {

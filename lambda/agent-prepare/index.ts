@@ -20,7 +20,6 @@ export async function handler(event: CloudFormationCustomResourceEvent) {
 
   const { agentId } = event.ResourceProperties as unknown as Props;
 
-  // Prepare the agent so the DRAFT reflects the latest configuration
   console.log(`Preparing agent ${agentId}`);
   await client.send(new PrepareAgentCommand({ agentId }));
   await waitUntilPrepared(agentId);
@@ -34,9 +33,21 @@ async function waitUntilPrepared(agentId: string): Promise<void> {
     await sleep(5_000);
     const { agent } = await client.send(new GetAgentCommand({ agentId }));
     const status = agent!.agentStatus!;
-    console.log(`Agent status: ${status}`);
+    const reasons = agent!.failureReasons ?? [];
+
+    console.log(`Agent status: ${status}`, reasons.length ? `Failure reasons: ${JSON.stringify(reasons)}` : '');
+
     if (status === 'PREPARED') return;
-    if (status !== 'PREPARING') throw new Error(`Unexpected agent status: ${status}`);
+    if (status === 'FAILED') {
+      throw new Error(
+        `Agent entered FAILED state. Bedrock failure reasons: ${
+          reasons.length ? reasons.join(' | ') : '(none returned — check Bedrock console → Agents → agent detail page)'
+        }`
+      );
+    }
+    if (status !== 'PREPARING') {
+      throw new Error(`Unexpected agent status: ${status}`);
+    }
   }
   throw new Error('Timed out waiting for agent PREPARED status');
 }

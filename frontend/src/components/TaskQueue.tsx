@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { getTasks, approveTask, rejectTask, dismissTask } from '../lib/api';
 import type { Task, TaskStatus } from '../lib/api';
+import { exportPoam } from '../lib/export';
 
 const POLL_MS = 30_000;
 
@@ -28,6 +29,7 @@ export default function TaskQueue() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actioning, setActioning] = useState<Record<string, 'approving' | 'rejecting' | 'dismissing'>>({});
+  const [exporting, setExporting] = useState(false);
 
   const fetchAll = useCallback(async () => {
     try {
@@ -56,6 +58,31 @@ export default function TaskQueue() {
     const timer = setInterval(() => void fetchAll(), POLL_MS);
     return () => clearInterval(timer);
   }, [fetchAll]);
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const [pendingRes, approvedRes, executedRes, rejectedRes, failedRes] = await Promise.all([
+        getTasks('PENDING'),
+        getTasks('APPROVED'),
+        getTasks('EXECUTED'),
+        getTasks('REJECTED'),
+        getTasks('FAILED'),
+      ]);
+      const all = [
+        ...pendingRes.tasks,
+        ...approvedRes.tasks,
+        ...executedRes.tasks,
+        ...rejectedRes.tasks,
+        ...failedRes.tasks,
+      ].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      exportPoam(all);
+    } catch (err) {
+      setError(`Export failed: ${(err as Error).message}`);
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const handleApprove = async (taskId: string) => {
     setActioning((prev) => ({ ...prev, [taskId]: 'approving' }));
@@ -86,14 +113,24 @@ export default function TaskQueue() {
       {/* Header */}
       <div style={styles.panelHeader}>
         <span style={styles.panelTitle}>Task Queue</span>
-        <button
-          onClick={() => { setLoading(true); void fetchAll(); }}
-          disabled={loading}
-          style={styles.refreshBtn}
-          title="Refresh"
-        >
-          {loading ? '...' : 'Refresh'}
-        </button>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            onClick={() => void handleExport()}
+            disabled={exporting || loading}
+            style={styles.exportBtn}
+            title="Download all tasks as POAM Excel file"
+          >
+            {exporting ? 'Exporting…' : 'Export POAM'}
+          </button>
+          <button
+            onClick={() => { setLoading(true); void fetchAll(); }}
+            disabled={loading}
+            style={styles.refreshBtn}
+            title="Refresh"
+          >
+            {loading ? '...' : 'Refresh'}
+          </button>
+        </div>
       </div>
 
       <div style={styles.scroll}>
@@ -327,12 +364,24 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     fontSize: 14,
   },
+  exportBtn: {
+    background: 'rgba(63,185,80,0.12)',
+    border: '1px solid rgba(63,185,80,0.35)',
+    color: 'var(--green)',
+    fontSize: 12,
+    fontWeight: 600,
+    padding: '3px 10px',
+    borderRadius: 5,
+    cursor: 'pointer',
+  },
   refreshBtn: {
     background: 'transparent',
     border: '1px solid var(--border)',
     color: 'var(--muted)',
     fontSize: 12,
     padding: '3px 10px',
+    borderRadius: 5,
+    cursor: 'pointer',
   },
   scroll: {
     flex: 1,

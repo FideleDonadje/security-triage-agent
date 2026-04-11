@@ -106,3 +106,110 @@ export async function rejectTask(taskId: string): Promise<void> {
 export async function dismissTask(taskId: string): Promise<void> {
   await authFetch(`/tasks/${encodeURIComponent(taskId)}`, { method: 'DELETE' });
 }
+
+// ── ATO Assist ─────────────────────────────────────────────────────────────────
+
+export interface SecurityStandard {
+  standardsSubscriptionArn: string;
+  standardsArn: string;
+  name: string;
+  description: string;
+  status: string;
+  atoSuitable: boolean;
+  notSuitableReason?: string;
+}
+
+/** GET /ato/standards — list enabled Security Hub standards with ATO suitability flags */
+export async function getEnabledStandards(): Promise<{ standards: SecurityStandard[]; message?: string }> {
+  const res = await authFetch('/ato/standards');
+  return res.json() as Promise<{ standards: SecurityStandard[]; message?: string }>;
+}
+
+export type AtoJobStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED';
+
+export interface AtoJob {
+  jobId: string;
+  username: string;
+  status: AtoJobStatus;
+  startTime: string;
+  endTime: string | null;
+  error: string | null;
+  resultS3Key: string;
+  presignedUrl?: string;
+}
+
+export interface PoamEntry {
+  poamId: string;
+  affectedControl: string;
+  description: string;
+  dateIdentified: string;
+  scheduledCompletionDate: string;
+  status: string;
+  riskRating: string;
+  remediationPlan: string;
+}
+
+export interface ControlFamily {
+  family: string;
+  familyName: string;
+  findingCount: number;
+  passCount: number;
+  failCount: number;
+  riskAssessment: string;
+  implementationStatement: string;
+  poamEntries: PoamEntry[];
+}
+
+export interface AtoReport {
+  controlFamilies: ControlFamily[];
+  summary: {
+    totalFindings: number;
+    totalFailed: number;
+    familiesEvaluated: number;
+  };
+  generatedAt: string;
+}
+
+/** POST /ato/generate — kick off a new ATO report job, returns the jobId */
+export async function generateAtoReport(
+  standardsArn: string,
+  standardName: string,
+): Promise<{ jobId: string }> {
+  const res = await authFetch('/ato/generate', {
+    method: 'POST',
+    body: JSON.stringify({ standardsArn, standardName }),
+  });
+  return res.json() as Promise<{ jobId: string }>;
+}
+
+export interface AtoJobSummary {
+  jobId: string;
+  status: AtoJobStatus;
+  startTime: string;
+  endTime?: string;
+  standardName?: string;
+  error?: string;
+}
+
+/** GET /ato/jobs — list the current analyst's past report jobs, newest first */
+export async function getJobHistory(): Promise<AtoJobSummary[]> {
+  const res = await authFetch('/ato/jobs');
+  const data = await res.json() as { jobs: AtoJobSummary[] };
+  return data.jobs;
+}
+
+/** GET /ato/status/{jobId} — poll job status; includes presignedUrl when COMPLETED */
+export async function getAtoStatus(jobId: string): Promise<AtoJob> {
+  const res = await authFetch(`/ato/status/${encodeURIComponent(jobId)}`);
+  return res.json() as Promise<AtoJob>;
+}
+
+/**
+ * Fetch the JSON report from the presigned S3 URL.
+ * No auth header — the URL is already signed by the trigger Lambda.
+ */
+export async function fetchAtoReport(presignedUrl: string): Promise<AtoReport> {
+  const res = await fetch(presignedUrl);
+  if (!res.ok) throw new Error(`Failed to fetch report: ${res.statusText}`);
+  return res.json() as Promise<AtoReport>;
+}
