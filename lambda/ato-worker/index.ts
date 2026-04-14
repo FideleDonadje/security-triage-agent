@@ -4,7 +4,7 @@
  * Triggered by DynamoDB Streams on the AtoJobsTable when a new job is INSERT-ed
  * with status=PENDING. For each job:
  *   1. Marks the job IN_PROGRESS
- *   2. Fetches active, failed Security Hub findings (paginated, up to 500)
+ *   2. Fetches active Security Hub findings (paginated, up to 2000)
  *   3. Groups findings by NIST 800-53 Rev 5 control family using RelatedRequirements
  *   4. For each family with failures, calls Bedrock (Claude Sonnet) to generate:
  *        - riskAssessment narrative
@@ -36,7 +36,7 @@ const REGION        = process.env.REGION ?? process.env.AWS_REGION ?? 'us-east-1
 const JOBS_TABLE    = process.env.JOBS_TABLE_NAME!;
 const REPORTS_BUCKET = process.env.REPORTS_BUCKET!;
 const MODEL_ID      = process.env.BEDROCK_MODEL_ID ?? 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
-const MAX_FINDINGS  = 500;  // Cap to avoid Lambda timeout on very large accounts
+const MAX_FINDINGS  = 2000; // Cap to avoid Lambda timeout on very large accounts (was 500 — missed families beyond that)
 
 // ── AWS clients ────────────────────────────────────────────────────────────────
 const ddb = DynamoDBDocumentClient.from(
@@ -205,9 +205,10 @@ async function processJob(jobId: string, username: string, standardsArn?: string
         console.error(`Bedrock call failed for family ${family}`, { jobId, error: msg });
         // Degrade gracefully: include the family with a fallback message
         // Cap at 10 entries — same limit as the Bedrock prompt
+        const fName = NIST_FAMILIES[family] ?? family;
         assessment = {
-          riskAssessment: `${failed.length} findings failed in the ${familyName} (${family}) control family. Manual review required — see POA&M entries below.`,
-          implementationStatement: `The ${familyName} control family has ${passed.length} passing and ${failed.length} failing controls. Review and remediate the findings listed in the POA&M section.`,
+          riskAssessment: `${failed.length} findings failed in the ${fName} (${family}) control family. Manual review required — see POA&M entries below.`,
+          implementationStatement: `The ${fName} control family has ${passed.length} passing and ${failed.length} failing controls. Review and remediate the findings listed in the POA&M section.`,
           poamEntries: failed.slice(0, 10).map((f, i) => ({
             poamId: `POAM-${family}-${String(i + 1).padStart(3, '0')}`,
             affectedControl: extractControlId(f, family),

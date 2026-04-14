@@ -1,12 +1,11 @@
 /**
  * export.ts — POAM Excel export using SheetJS
  *
- * Generates a two-sheet workbook:
- *   Sheet 1 "Summary"  — counts by status + generated date
- *   Sheet 2 "POAM"     — one row per task, color-coded by status
+ * exportPoam(tasks)        — triage task queue export (kept for reference)
+ * exportAtoPoam(report)    — ATO report POA&M export (primary use case)
  */
 import * as XLSX from 'xlsx';
-import type { Task } from './api';
+import type { Task, AtoReport } from './api';
 
 // ── Completion deadline logic ─────────────────────────────────────────────────
 
@@ -139,4 +138,114 @@ export function exportPoam(tasks: Task[]): void {
 
 function riskLabel(tier: number): string {
   return tier === 1 ? 'High' : tier === 2 ? 'Medium' : 'Low';
+}
+
+// ── ATO Report POAM export ────────────────────────────────────────────────────
+
+const RISK_FILL: Record<string, string> = {
+  High:   'FFFFD6D6', // light red
+  Medium: 'FFFFF9D6', // light yellow
+  Low:    'FFD6F5D6', // light green
+};
+
+export function exportAtoPoam(report: AtoReport, standardName?: string): void {
+  const wb = XLSX.utils.book_new();
+  const { totalFindings, totalFailed, familiesEvaluated } = report.summary;
+  const passRate = totalFindings > 0
+    ? Math.round(((totalFindings - totalFailed) / totalFindings) * 100)
+    : 100;
+
+  // ── Sheet 1: Summary ──────────────────────────────────────────────────────
+  const summaryRows: (string | number)[][] = [
+    ['ATO Assist — POA&M Export'],
+    ['Standard',           standardName ?? 'NIST 800-53 Rev 5'],
+    ['Generated',          new Date().toLocaleString()],
+    ['Report Date',        report.generatedAt.slice(0, 10)],
+    [],
+    ['Metric',             'Value'],
+    ['Total Findings',     totalFindings],
+    ['Passed',             totalFindings - totalFailed],
+    ['Failed',             totalFailed],
+    ['Pass Rate',          `${passRate}%`],
+    ['Families Evaluated', familiesEvaluated],
+  ];
+
+  const ws1 = XLSX.utils.aoa_to_sheet(summaryRows);
+  ws1['!cols'] = [{ wch: 22 }, { wch: 35 }];
+  if (ws1['A1']) ws1['A1'].s = { font: { bold: true, sz: 14 } };
+  if (ws1['A6']) ws1['A6'].s = { font: { bold: true } };
+  if (ws1['B6']) ws1['B6'].s = { font: { bold: true } };
+  XLSX.utils.book_append_sheet(wb, ws1, 'Summary');
+
+  // ── Sheet 2: POAM ─────────────────────────────────────────────────────────
+  const headers = [
+    'POA&M ID',
+    'Control Family',
+    'Affected Control',
+    'Risk Rating',
+    'Status',
+    'Date Identified',
+    'Scheduled Completion',
+    'Description',
+    'Remediation Plan',
+  ];
+
+  const rows: (string)[][] = [];
+  for (const cf of report.controlFamilies) {
+    for (const e of cf.poamEntries) {
+      rows.push([
+        e.poamId,
+        `${cf.family} — ${cf.familyName}`,
+        e.affectedControl,
+        e.riskRating,
+        e.status,
+        e.dateIdentified,
+        e.scheduledCompletionDate,
+        e.description,
+        e.remediationPlan,
+      ]);
+    }
+  }
+
+  const ws2 = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+  ws2['!cols'] = [
+    { wch: 16 }, // POA&M ID
+    { wch: 36 }, // Control Family
+    { wch: 16 }, // Affected Control
+    { wch: 12 }, // Risk Rating
+    { wch: 10 }, // Status
+    { wch: 16 }, // Date Identified
+    { wch: 22 }, // Scheduled Completion
+    { wch: 60 }, // Description
+    { wch: 70 }, // Remediation Plan
+  ];
+  ws2['!freeze'] = { xSplit: 0, ySplit: 1 };
+
+  // Bold dark header row
+  for (let col = 0; col < headers.length; col++) {
+    const addr = XLSX.utils.encode_cell({ r: 0, c: col });
+    if (ws2[addr]) {
+      ws2[addr].s = {
+        font: { bold: true, color: { rgb: 'FFFFFFFF' } },
+        fill: { fgColor: { rgb: 'FF1F2937' } },
+        alignment: { wrapText: true },
+      };
+    }
+  }
+
+  // Color rows by risk rating (column index 3)
+  rows.forEach((row, rowIdx) => {
+    const fill = RISK_FILL[row[3]];
+    if (!fill) return;
+    for (let col = 0; col < headers.length; col++) {
+      const addr = XLSX.utils.encode_cell({ r: rowIdx + 1, c: col });
+      if (!ws2[addr]) ws2[addr] = { t: 's', v: '' };
+      ws2[addr].s = { fill: { fgColor: { rgb: fill } }, alignment: { wrapText: true, vertical: 'top' } };
+    }
+  });
+
+  XLSX.utils.book_append_sheet(wb, ws2, 'POAM');
+
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  XLSX.writeFile(wb, `ATO_POAM_${date}.xlsx`, { bookSST: false, cellStyles: true });
 }

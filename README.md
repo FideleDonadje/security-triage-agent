@@ -8,7 +8,10 @@
 ![TypeScript](https://img.shields.io/badge/Language-TypeScript-3178C6?logo=typescript&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-MVP%20in%20progress-yellow)
 
-An AI-powered AWS security operations agent built on Bedrock AgentCore and Claude Sonnet. Analysts chat with it in plain English to investigate Security Hub findings — the agent enriches them with GuardDuty, Config, and CloudTrail context, proposes specific remediation actions with rationale, and executes them only after explicit human approval.
+An AI-powered AWS security operations platform built on Bedrock AgentCore and Claude Sonnet. Two capabilities:
+
+- **Triage Agent** — analysts chat in plain English to investigate Security Hub findings. The agent enriches them with GuardDuty, Config, and CloudTrail context, proposes remediation tasks with rationale, and executes them only after explicit human approval.
+- **ATO Assist** — generates NIST 800-53 Rev 5 compliance reports from Security Hub findings. Bedrock writes a risk assessment, implementation statement, and POA&M entries for each failing control family. Reports export to Excel and are retained in S3 for 7 years.
 
 ---
 
@@ -69,7 +72,7 @@ In a multi-account environment, Security Hub's aggregated view means the agent w
 ```mermaid
 flowchart TB
     subgraph browser[" Browser "]
-        UI["React SPA\nChat · Task Queue"]
+        UI["React SPA\nChat · Task Queue · ATO Assist"]
     end
 
     subgraph auth[" Auth "]
@@ -84,7 +87,9 @@ flowchart TB
         WAF["WAF\nOWASP rules · rate limit"]
         APIGW["API Gateway"]
         NodeLambda["Node.js Lambda\nJWT validation"]
+        AtoTrigger["ATO Trigger Lambda\n/ato/* routes"]
         WAF --> APIGW --> NodeLambda
+        APIGW --> AtoTrigger
     end
 
     subgraph agentlayer[" Agent "]
@@ -100,13 +105,20 @@ flowchart TB
 
     subgraph datalayer[" Data "]
         DDB[("DynamoDB\ntask queue")]
+        AtoDB[("DynamoDB\nATO jobs")]
         SSM["SSM Parameter Store\nagent ID wiring"]
+    end
+
+    subgraph atolayer[" ATO Assist — separate IAM role "]
+        AtoWorker["ATO Worker Lambda\nSecurity Hub → Bedrock → S3"]
+        AtoS3[("S3\nATO reports\n7-year retention")]
+        AtoWorker --> AtoS3
     end
 
     subgraph executionlayer[" Execution — separate IAM role "]
         ExecLambda["Execution Lambda"]
-        S3["S3\nPutBucketLogging\nResourceGroupsTaggingAPI TagResources"]
-        ExecLambda -->|"tags every resource touched"| S3
+        ExecS3["S3\nPutBucketLogging\nTagResources"]
+        ExecLambda -->|"tags every resource touched"| ExecS3
     end
 
     CW["CloudWatch\n90-day audit trail"]
@@ -122,7 +134,13 @@ flowchart TB
 
     DDB -->|"stream · status = APPROVED"| ExecLambda
 
-    NodeLambda & AgentCore & ExecLambda --> CW
+    AtoTrigger -->|"create / query jobs"| AtoDB
+    AtoTrigger -->|"presigned URL"| AtoS3
+    AtoDB -->|"stream · INSERT"| AtoWorker
+    AtoWorker -->|"read findings"| SH
+    AtoWorker -->|"generate narratives"| AgentCore
+
+    NodeLambda & AgentCore & ExecLambda & AtoWorker --> CW
     AgentCore -.->|"reads agent ID at cold start"| SSM
 ```
 
@@ -166,12 +184,12 @@ flowchart TB
 
 ## Project structure
 
-```
+```text
 .
 ├── cdk/                          # AWS CDK infrastructure (TypeScript)
 │   ├── bin/app.ts                # CDK app entry point — instantiates all stacks
 │   └── lib/
-│       ├── security-triage-stack.ts  # Core: Cognito, DynamoDB, Lambdas, API GW, WAF
+│       ├── security-triage-stack.ts  # Core: Cognito, DynamoDB, Lambdas, API GW, WAF, S3
 │       ├── agent-stack.ts            # Bedrock AgentCore IAM role + auto-prepare resource
 │       └── frontend-stack.ts         # S3 + CloudFront for React SPA
 ├── lambda/
@@ -181,22 +199,33 @@ flowchart TB
 │   │   ├── chat.ts               # Async Bedrock AgentCore proxy (POST→202, GET poll)
 │   │   └── tasks.ts              # Task queue CRUD
 │   ├── agent-tools/              # Bedrock action group handler
-│   │   └── index.ts              # get_findings, get_threat_context, get_tag_compliance, get_enabled_standards, get_compliance_report, queue_task, cancel_task, etc.
+│   │   └── index.ts              # get_findings, get_threat_context, get_tag_compliance,
+│   │                             #   get_enabled_standards, get_compliance_report,
+│   │                             #   queue_task, cancel_task, get_task_queue, etc.
 │   ├── agent-prepare/            # CDK custom resource — prepares agent after deploy
 │   │   └── index.ts
-│   └── execution/                # Execution Lambda — remediation actions
-│       ├── index.ts              # Handler + DynamoDB stream parser
-│       ├── enable-logging.ts     # S3 PutBucketLogging
-│       └── apply-tags.ts         # ResourceGroupsTaggingAPI TagResources
+│   ├── execution/                # Execution Lambda — Tier 1 remediation actions
+│   │   ├── index.ts              # Handler + DynamoDB stream parser
+│   │   ├── enable-logging.ts     # S3 PutBucketLogging
+│   │   └── apply-tags.ts         # ResourceGroupsTaggingAPI TagResources
+│   ├── ato-trigger/              # ATO Assist API handler
+│   │   └── index.ts              # /ato/standards, /ato/generate, /ato/status, /ato/jobs
+│   └── ato-worker/               # ATO Assist background processor
+│       └── index.ts              # Security Hub → group by NIST family → Bedrock → S3
 ├── frontend/                     # React + Vite SPA
 │   ├── src/
-│   │   ├── App.tsx
+│   │   ├── App.tsx               # Shell: header with avatar dropdown + tab nav
 │   │   ├── components/
-│   │   │   ├── Chat.tsx          # Chat panel (right)
-│   │   │   └── TaskQueue.tsx     # Task queue panel (left)
+│   │   │   ├── Chat.tsx          # Chat panel (right side of Triage tab)
+│   │   │   ├── TaskQueue.tsx     # Task queue panel (left side of Triage tab)
+│   │   │   │                     #   filter tabs, pending count badge, approve/reject
+│   │   │   └── AtoAssist.tsx     # ATO report panel (ATO Assist tab)
+│   │   │                         #   standards dropdown, job history sidebar, report view,
+│   │   │                         #   progress card with elapsed timer, Export POAM button
 │   │   └── lib/
 │   │       ├── auth.ts           # Cognito PKCE auth flow
-│   │       └── api.ts            # API Gateway client
+│   │       ├── api.ts            # API Gateway client + all type definitions
+│   │       └── export.ts         # SheetJS POAM export (exportPoam, exportAtoPoam)
 │   └── package.json
 └── CLAUDE.md                     # AI agent instructions and architecture rules
 ```
@@ -206,16 +235,17 @@ flowchart TB
 ## Stack
 
 | Layer | Technology |
-|---|---|
+| --- | --- |
 | Infrastructure | AWS CDK v2 (TypeScript) |
 | Auth | Amazon Cognito — PKCE authorization code flow |
 | API | API Gateway + Node.js 22 Lambda |
 | Agent | AWS Bedrock AgentCore, Claude Sonnet 4.5 |
-| Database | DynamoDB (single table, streams) |
-| Storage | S3 + CloudFront |
+| Compliance AI | Bedrock InvokeModel (Claude Sonnet) via ATO Worker Lambda |
+| Database | DynamoDB — task queue table + ATO jobs table |
+| Storage | S3 + CloudFront; ATO reports bucket (Glacier after 1yr, deleted after 7yr) |
 | Security | WAF (OWASP rules + rate limiting) |
 | Observability | CloudWatch (90-day log retention) |
-| Frontend | React + Vite |
+| Frontend | React + Vite, SheetJS for POAM Excel export |
 
 ---
 
@@ -392,11 +422,13 @@ The following resources survive `cdk destroy` to protect against accidental data
 `destroy.sh` handles their cleanup automatically. If you need to clean them up manually:
 
 | Resource | Name | How to delete |
-|---|---|---|
-| DynamoDB table | `security-triage-tasks` | `aws dynamodb delete-table --table-name security-triage-tasks` |
+| --- | --- | --- |
+| DynamoDB — task queue | `security-triage-tasks` | `aws dynamodb delete-table --table-name security-triage-tasks` |
+| DynamoDB — ATO jobs | `security-triage-ato-jobs` | `aws dynamodb delete-table --table-name security-triage-ato-jobs` |
 | Cognito User Pool | `security-triage-analysts` | Console or `aws cognito-idp delete-user-pool --user-pool-id <id>` |
-| S3 frontend bucket | `security-triage-frontend-{account}-{region}` | Empty then delete via console or CLI |
+| S3 frontend bucket | `securitytriagefrontendstack-frontendbucket-*` | Empty then delete via console or CLI |
 | S3 access logs bucket | `security-triage-access-logs-{account}-{region}` | Empty then delete via console or CLI |
+| S3 ATO reports bucket | `security-triage-ato-reports-{account}-{region}` | Empty then delete via console or CLI |
 
 If a **failed deploy** rolls back and leaves these resources, re-adopt them without data loss:
 

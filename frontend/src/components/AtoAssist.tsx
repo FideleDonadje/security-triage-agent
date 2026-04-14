@@ -12,6 +12,7 @@ import {
   type AtoJob, type AtoReport, type ControlFamily, type PoamEntry,
   type SecurityStandard, type AtoJobSummary,
 } from '../lib/api';
+import { exportAtoPoam } from '../lib/export';
 
 const POLL_MS     = 3_000;
 const RISK_COLORS: Record<string, string> = {
@@ -37,15 +38,65 @@ export default function AtoAssist() {
   // History
   const [history,        setHistory]        = useState<AtoJobSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
+  const [showArchived,   setShowArchived]   = useState(false);
+
+  // Archived job IDs — stored in localStorage, never deleted from S3/DynamoDB
+  const [archivedIds, setArchivedIds] = useState<Set<string>>(() => {
+    try {
+      const stored = localStorage.getItem('ato-archived-jobs');
+      return stored ? new Set(JSON.parse(stored) as string[]) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
+
+  const archiveJob = (jobId: string) => {
+    setArchivedIds((prev) => {
+      const next = new Set(prev);
+      next.add(jobId);
+      try { localStorage.setItem('ato-archived-jobs', JSON.stringify([...next])); } catch { /* ignore */ }
+      return next;
+    });
+  };
+
+  const unarchiveJob = (jobId: string) => {
+    setArchivedIds((prev) => {
+      const next = new Set(prev);
+      next.delete(jobId);
+      try { localStorage.setItem('ato-archived-jobs', JSON.stringify([...next])); } catch { /* ignore */ }
+      return next;
+    });
+  };
 
   // Current job
   const [jobId,      setJobId]      = useState<string | null>(null);
   const [job,        setJob]        = useState<AtoJob | null>(null);
   const [report,     setReport]     = useState<AtoReport | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [exporting,  setExporting]  = useState(false);
   const [error,      setError]      = useState<string | null>(null);
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // In-app toast for job completion (shown even if browser notifications are granted)
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = (message: string, type: 'success' | 'error') => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast({ message, type });
+    toastTimerRef.current = setTimeout(() => setToast(null), 6000);
+  };
+
+  // Browser notification helper
+  const notify = (title: string, body: string) => {
+    if (typeof Notification === 'undefined') return;
+    if (Notification.permission === 'granted') {
+      new Notification(title, { body, icon: '/favicon.ico' });
+    }
+  };
+
+  const pollRef      = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [jobStartedAt, setJobStartedAt] = useState<number | null>(null);
+  const [elapsed,      setElapsed]      = useState(0);
 
   // ── Load standards + history on mount ────────────────────────────────────────
   useEffect(() => {
@@ -85,6 +136,13 @@ export default function AtoAssist() {
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
+  // Tick elapsed seconds while jobStartedAt is set (cleared when job finishes)
+  useEffect(() => {
+    if (jobStartedAt === null) { setElapsed(0); return; }
+    const tick = setInterval(() => setElapsed(Math.floor((Date.now() - jobStartedAt) / 1000)), 1000);
+    return () => clearInterval(tick);
+  }, [jobStartedAt]);
+
   const pollStatus = useCallback(async (id: string) => {
     try {
       const status = await getAtoStatus(id);
@@ -92,18 +150,24 @@ export default function AtoAssist() {
 
       if (status.status === 'COMPLETED' && status.presignedUrl) {
         stopPolling();
-        // Refresh history so the new job appears
+        setJobStartedAt(null);
         getJobHistory().then(setHistory).catch(() => null);
         try {
           const fetched = await fetchAtoReport(status.presignedUrl);
           setReport(fetched);
+          notify('ATO Report Ready', 'Your compliance report has finished generating.');
+          showToast('Report generated successfully — scroll down to view results.', 'success');
         } catch (e) {
           setError(`Report ready but could not be fetched: ${(e as Error).message}`);
         }
       } else if (status.status === 'FAILED') {
         stopPolling();
+        setJobStartedAt(null);
         getJobHistory().then(setHistory).catch(() => null);
-        setError(status.error ?? 'Report generation failed.');
+        const msg = status.error ?? 'Report generation failed.';
+        setError(msg);
+        notify('ATO Report Failed', msg);
+        showToast(`Report failed: ${msg}`, 'error');
       }
     } catch (e) {
       console.warn('Poll error:', (e as Error).message);
@@ -115,6 +179,11 @@ export default function AtoAssist() {
     const selected = standards.find((s) => s.standardsArn === selectedArn);
     if (!selected) return;
 
+    // Request browser notification permission while we still have a user gesture
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      await Notification.requestPermission();
+    }
+
     setGenerating(true);
     setError(null);
     setReport(null);
@@ -125,12 +194,26 @@ export default function AtoAssist() {
     try {
       const { jobId: newJobId } = await generateAtoReport(selected.standardsArn, selected.name);
       setJobId(newJobId);
+      setJobStartedAt(Date.now());
       void pollStatus(newJobId);
       pollRef.current = setInterval(() => void pollStatus(newJobId), POLL_MS);
     } catch (e) {
       setError(`Failed to start report: ${(e as Error).message}`);
     } finally {
       setGenerating(false);
+    }
+  };
+
+  // ── Export loaded report as POAM Excel ───────────────────────────────────────
+  const handleExportPoam = () => {
+    if (!report) return;
+    setExporting(true);
+    try {
+      exportAtoPoam(report, selectedStd?.name);
+    } catch (e) {
+      setError(`Export failed: ${(e as Error).message}`);
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -158,10 +241,6 @@ export default function AtoAssist() {
   const isPolling   = !!pollRef.current;
   const selectedStd = standards.find((s) => s.standardsArn === selectedArn);
   const canGenerate = !generating && !isPolling && !!selectedStd?.atoSuitable;
-
-  const statusLabel = job
-    ? ({ PENDING: 'Queued…', IN_PROGRESS: 'Generating…', COMPLETED: 'Complete', FAILED: 'Failed' }[job.status] ?? job.status)
-    : null;
 
   return (
     <div style={styles.container}>
@@ -193,6 +272,17 @@ export default function AtoAssist() {
             </select>
           )}
 
+          {report && (
+            <button
+              onClick={handleExportPoam}
+              disabled={exporting}
+              style={styles.exportBtn}
+              title="Download POA&M entries as Excel"
+            >
+              {exporting ? 'Exporting…' : 'Export POAM'}
+            </button>
+          )}
+
           <button
             onClick={() => void handleGenerate()}
             disabled={!canGenerate}
@@ -219,35 +309,67 @@ export default function AtoAssist() {
             <div style={styles.sidebarEmpty}>Loading…</div>
           ) : history.length === 0 ? (
             <div style={styles.sidebarEmpty}>No reports yet</div>
-          ) : (
-            history.map((h) => {
-              const isActive = h.jobId === jobId;
-              return (
-                <button
-                  key={h.jobId}
-                  onClick={() => void handleLoadHistory(h)}
-                  disabled={h.status !== 'COMPLETED'}
-                  style={{
-                    ...styles.historyItem,
-                    ...(isActive ? styles.historyItemActive : {}),
-                    cursor: h.status === 'COMPLETED' ? 'pointer' : 'default',
-                    opacity: h.status === 'FAILED' ? 0.6 : 1,
-                  }}
-                  title={h.status !== 'COMPLETED' ? (h.error ?? h.status) : undefined}
-                >
-                  <div style={styles.historyTop}>
-                    <span style={{ ...styles.historyStatus, color: STATUS_COLOR[h.status] ?? 'var(--muted)' }}>
-                      {h.status === 'COMPLETED' ? '✓' : h.status === 'FAILED' ? '✗' : '●'}
-                    </span>
-                    <span style={styles.historyStd}>{h.standardName ?? 'NIST 800-53'}</span>
-                  </div>
-                  <div style={styles.historyDate}>
-                    {new Date(h.startTime).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                  </div>
-                </button>
-              );
-            })
-          )}
+          ) : (() => {
+            const visible   = history.filter((h) => showArchived ? archivedIds.has(h.jobId) : !archivedIds.has(h.jobId));
+            const numHidden = history.filter((h) => archivedIds.has(h.jobId)).length;
+            return (
+              <>
+                <div style={{ flex: 1, overflowY: 'auto' }}>
+                  {visible.length === 0 && (
+                    <div style={styles.sidebarEmpty}>{showArchived ? 'No archived reports' : 'No reports yet'}</div>
+                  )}
+                  {visible.map((h) => {
+                    const isActive   = h.jobId === jobId;
+                    const isArchived = archivedIds.has(h.jobId);
+                    return (
+                      <div key={h.jobId} style={{ position: 'relative' }}>
+                        <button
+                          onClick={() => void handleLoadHistory(h)}
+                          disabled={h.status !== 'COMPLETED'}
+                          style={{
+                            ...styles.historyItem,
+                            ...(isActive ? styles.historyItemActive : {}),
+                            cursor: h.status === 'COMPLETED' ? 'pointer' : 'default',
+                            opacity: h.status === 'FAILED' ? 0.6 : 1,
+                            paddingRight: 28, // leave room for archive button
+                          }}
+                          title={h.status !== 'COMPLETED' ? (h.error ?? h.status) : undefined}
+                        >
+                          <div style={styles.historyTop}>
+                            <span style={{ ...styles.historyStatus, color: STATUS_COLOR[h.status] ?? 'var(--muted)' }}>
+                              {h.status === 'COMPLETED' ? '✓' : h.status === 'FAILED' ? '✗' : '●'}
+                            </span>
+                            <span style={styles.historyStd}>{h.standardName ?? 'NIST 800-53'}</span>
+                          </div>
+                          <div style={styles.historyDate}>
+                            {new Date(h.startTime).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                          </div>
+                        </button>
+                        {/* Archive / Unarchive button */}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); isArchived ? unarchiveJob(h.jobId) : archiveJob(h.jobId); }}
+                          style={styles.archiveBtn}
+                          title={isArchived ? 'Restore to history' : 'Archive report'}
+                        >
+                          {isArchived ? '↩' : '×'}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Archived toggle */}
+                {numHidden > 0 || showArchived ? (
+                  <button
+                    style={styles.archivedToggle}
+                    onClick={() => setShowArchived((v) => !v)}
+                  >
+                    {showArchived ? '← Back to history' : `Show archived (${numHidden})`}
+                  </button>
+                ) : null}
+              </>
+            );
+          })()}
         </div>
 
         {/* Main content */}
@@ -260,13 +382,12 @@ export default function AtoAssist() {
           )}
 
           {isPolling && job && (
-            <div style={styles.progressCard}>
-              <div style={styles.progressDot} />
-              <div>
-                <div style={styles.progressLabel}>{statusLabel}</div>
-                <div style={styles.progressSub}>Job {jobId ?? ''}</div>
-              </div>
-            </div>
+            <ProgressCard
+              status={job.status}
+              standardName={selectedStd?.name}
+              jobId={jobId ?? ''}
+              elapsed={elapsed}
+            />
           )}
 
           {!report && !isPolling && !error && (
@@ -300,6 +421,58 @@ export default function AtoAssist() {
             </>
           )}
         </div>
+      </div>
+
+      {/* ── Toast notification ──────────────────────────────────────────────── */}
+      {toast && (
+        <div style={{ ...styles.toast, ...(toast.type === 'error' ? styles.toastError : styles.toastSuccess) }}>
+          <span>{toast.message}</span>
+          <button onClick={() => setToast(null)} style={styles.toastClose}>×</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Progress card ─────────────────────────────────────────────────────────────
+
+const PHASE_DETAIL: Record<string, { headline: string; detail: string }> = {
+  PENDING: {
+    headline: 'Job queued — waiting for worker',
+    detail:   'The report job has been created and will start shortly.',
+  },
+  IN_PROGRESS: {
+    headline: 'Generating report',
+    detail:   'Pulling findings from Security Hub, then asking Bedrock to write a risk assessment, implementation statement, and POA&M entries for each control family. This typically takes 2–4 minutes.',
+  },
+};
+
+function formatElapsed(secs: number): string {
+  if (secs < 60) return `${secs}s`;
+  return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+}
+
+function ProgressCard({ status, standardName, jobId, elapsed }: {
+  status: string; standardName?: string; jobId: string; elapsed: number;
+}) {
+  const phase = PHASE_DETAIL[status] ?? { headline: status, detail: '' };
+  return (
+    <div style={styles.progressCard}>
+      <div style={styles.progressDotWrap}>
+        <div style={styles.progressDot} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={styles.progressTop}>
+          <span style={styles.progressLabel}>{phase.headline}</span>
+          {elapsed > 0 && (
+            <span style={styles.progressTimer}>{formatElapsed(elapsed)}</span>
+          )}
+        </div>
+        {standardName && (
+          <div style={styles.progressStd}>{standardName}</div>
+        )}
+        <div style={styles.progressDetail}>{phase.detail}</div>
+        <div style={styles.progressJobId}>Job {jobId}</div>
       </div>
     </div>
   );
@@ -502,6 +675,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--surface2)', color: 'var(--text)', border: '1px solid var(--border)',
     borderRadius: 6, padding: '5px 10px', fontSize: 12, cursor: 'pointer', maxWidth: 280,
   },
+  exportBtn:    { background: 'rgba(63,185,80,0.12)', border: '1px solid rgba(63,185,80,0.35)', color: 'var(--green)', fontSize: 12, fontWeight: 600, padding: '5px 14px', borderRadius: 6, flexShrink: 0, cursor: 'pointer' },
   generateBtn:  { background: 'var(--blue)', color: '#fff', fontSize: 12, fontWeight: 600, padding: '5px 14px', borderRadius: 6, flexShrink: 0 },
   mutedText:    { fontSize: 12, color: 'var(--muted)', fontStyle: 'italic' },
   warnText:     { fontSize: 12, color: 'var(--yellow)' },
@@ -523,15 +697,34 @@ const styles: Record<string, React.CSSProperties> = {
   historyStatus: { fontSize: 12, fontWeight: 700, flexShrink: 0 },
   historyStd:   { fontSize: 11, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const },
   historyDate:  { fontSize: 10, color: 'var(--muted)', fontFamily: 'ui-monospace, monospace' },
+  archiveBtn:   {
+    position: 'absolute', top: 8, right: 6,
+    background: 'transparent', border: 'none',
+    color: 'var(--muted)', fontSize: 14, lineHeight: 1,
+    padding: '1px 4px', cursor: 'pointer', opacity: 0.5,
+    borderRadius: 3,
+  },
+  archivedToggle: {
+    flexShrink: 0, width: '100%', textAlign: 'left' as const,
+    padding: '8px 12px', background: 'transparent',
+    borderTop: '1px solid var(--border)', borderRadius: 0,
+    color: 'var(--muted)', fontSize: 11, cursor: 'pointer',
+    fontStyle: 'italic',
+  },
 
   // Main
   main:         { flex: 1, overflow: 'hidden', padding: '12px 12px 12px', display: 'flex', flexDirection: 'column', gap: 10 },
   errorBanner:  { background: 'rgba(248,81,73,0.1)', border: '1px solid rgba(248,81,73,0.3)', borderRadius: 6, padding: '8px 12px', color: 'var(--red)', fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 },
   dismissBtn:   { background: 'transparent', color: 'var(--muted)', fontSize: 16, padding: '0 4px', flexShrink: 0 },
-  progressCard: { display: 'flex', alignItems: 'center', gap: 12, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '12px 16px' },
-  progressDot:  { width: 10, height: 10, borderRadius: '50%', background: 'var(--blue)', flexShrink: 0 },
-  progressLabel: { fontSize: 13, fontWeight: 600, color: 'var(--text)' },
-  progressSub:  { fontSize: 11, color: 'var(--muted)', fontFamily: 'ui-monospace, monospace', marginTop: 2 },
+  progressCard:   { display: 'flex', alignItems: 'flex-start', gap: 14, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '16px 18px' },
+  progressDotWrap: { paddingTop: 3, flexShrink: 0 },
+  progressDot:    { width: 10, height: 10, borderRadius: '50%', background: 'var(--blue)', animation: 'pulse 1.5s ease-in-out infinite' },
+  progressTop:    { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  progressLabel:  { fontSize: 14, fontWeight: 600, color: 'var(--text)' },
+  progressTimer:  { fontSize: 12, color: 'var(--blue)', fontFamily: 'ui-monospace, monospace', fontVariantNumeric: 'tabular-nums', flexShrink: 0 },
+  progressStd:    { fontSize: 12, color: 'var(--muted)', marginTop: 3 },
+  progressDetail: { fontSize: 13, color: 'var(--text)', lineHeight: 1.6, marginTop: 8, opacity: 0.8 },
+  progressJobId:  { fontSize: 10, color: 'var(--muted)', fontFamily: 'ui-monospace, monospace', marginTop: 8 },
   emptyState:   { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '48px 24px', gap: 12, flex: 1 },
   emptyIcon:    { fontSize: 32 },
   emptyTitle:   { fontSize: 14, fontWeight: 600, color: 'var(--text)' },
@@ -566,4 +759,28 @@ const styles: Record<string, React.CSSProperties> = {
   tr:           { borderBottom: '1px solid var(--border)' },
   td:           { padding: '7px 10px', color: 'var(--text)', verticalAlign: 'top' as const, lineHeight: 1.5 },
   mono:         { fontFamily: 'ui-monospace, SFMono-Regular, monospace', fontSize: 11 },
+  // ── Toast ────────────────────────────────────────────────────────────────────
+  toast: {
+    position: 'fixed', bottom: 24, right: 24, zIndex: 200,
+    display: 'flex', alignItems: 'center', gap: 12,
+    padding: '12px 16px', borderRadius: 8, maxWidth: 420,
+    boxShadow: '0 4px 20px rgba(0,0,0,0.5)',
+    fontSize: 13, fontWeight: 500, lineHeight: 1.5,
+    animation: 'slideUp 0.2s ease-out',
+  },
+  toastSuccess: {
+    background: '#0d2818',
+    border: '1px solid rgba(63,185,80,0.4)',
+    color: 'var(--green)',
+  },
+  toastError: {
+    background: '#2a0d0d',
+    border: '1px solid rgba(248,81,73,0.4)',
+    color: 'var(--red)',
+  },
+  toastClose: {
+    background: 'transparent', border: 'none',
+    color: 'inherit', fontSize: 18, lineHeight: 1,
+    padding: '0 2px', cursor: 'pointer', opacity: 0.7, flexShrink: 0,
+  },
 };

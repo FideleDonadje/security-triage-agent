@@ -24,7 +24,7 @@ const REGION           = process.env.REGION ?? process.env.AWS_REGION ?? 'us-eas
 const JOBS_TABLE        = process.env.JOBS_TABLE_NAME!;
 const JOBS_USERNAME_IDX = process.env.JOBS_USERNAME_INDEX ?? 'username-index';
 const REPORTS_BUCKET    = process.env.REPORTS_BUCKET!;
-const TTL_DAYS         = 90;
+const TTL_DAYS         = 365 * 7; // 7-year retention — POAM reports are compliance artifacts
 const STUCK_TIMEOUT_MS = 10 * 60 * 1000;
 const PRESIGNED_TTL_S  = 3600;
 

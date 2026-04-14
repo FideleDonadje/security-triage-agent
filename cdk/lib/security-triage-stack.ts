@@ -607,7 +607,7 @@ export class SecurityTriageStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       // Stream triggers the ato-worker Lambda on INSERT (new job created)
       stream: dynamodb.StreamViewType.NEW_IMAGE,
-      timeToLiveAttribute: 'ttl',   // jobs auto-expire after 90 days
+      timeToLiveAttribute: 'ttl',   // job records expire after 7 years (set by ato-trigger Lambda)
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
       // PITR conditional — same policy as the task table
       pointInTimeRecoverySpecification: {
@@ -630,7 +630,16 @@ export class SecurityTriageStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       enforceSSL: true,
       encryption: s3.BucketEncryption.S3_MANAGED,
-      lifecycleRules: [{ expiration: cdk.Duration.days(90) }], // match job TTL
+      lifecycleRules: [
+        {
+          // POA&M reports are compliance artifacts — keep in S3 for 7 years.
+          // Move to Glacier after 1 year (infrequent access after audit closes).
+          transitions: [
+            { storageClass: s3.StorageClass.GLACIER, transitionAfter: cdk.Duration.days(365) },
+          ],
+          expiration: cdk.Duration.days(365 * 7), // hard delete after 7 years
+        },
+      ],
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       // CORS required so the browser can fetch the presigned URL directly from S3.
       // Presigned URLs are already time-limited and IAM-signed — wildcard origin is safe here.
