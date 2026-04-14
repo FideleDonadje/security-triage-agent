@@ -9,25 +9,38 @@ const ACTION_LABELS: Record<string, string> = {
   tag_resource: 'Tag Resource',
 };
 
-const ACTIVITY_STATUSES: TaskStatus[] = ['EXECUTED', 'REJECTED', 'FAILED'];
-
 // Shorten any ARN to a readable label: last non-empty path segment
 function resourceLabel(resourceId: string): string {
   if (!resourceId.startsWith('arn:aws:')) return resourceId;
-  // e.g. arn:aws:s3:::my-bucket → my-bucket
-  //      arn:aws:cognito-idp:us-east-1:123:userpool/us-east-1_abc → userpool/us-east-1_abc
   const withoutPrefix = resourceId.replace(/^arn:aws:[^:]*:[^:]*:[^:]*:/, '');
   return withoutPrefix || resourceId;
 }
 
+// ── Filter tabs ───────────────────────────────────────────────────────────────
+
+type FilterTab = 'all' | 'pending' | 'executed' | 'failed' | 'rejected';
+
+const FILTER_LABELS: Record<FilterTab, string> = {
+  all:      'All',
+  pending:  'Pending',
+  executed: 'Executed',
+  failed:   'Failed',
+  rejected: 'Rejected',
+};
+
 // ── Component ──────────────────────────────────────────────────────────────────
 
-export default function TaskQueue() {
-  const [pending, setPending] = useState<Task[]>([]);
-  const [activity, setActivity] = useState<Task[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+interface TaskQueueProps {
+  onPendingCount?: (count: number) => void;
+}
+
+export default function TaskQueue({ onPendingCount }: TaskQueueProps) {
+  const [pending,   setPending]   = useState<Task[]>([]);
+  const [activity,  setActivity]  = useState<Task[]>([]);
+  const [loading,   setLoading]   = useState(true);
+  const [error,     setError]     = useState<string | null>(null);
   const [actioning, setActioning] = useState<Record<string, 'approving' | 'rejecting' | 'dismissing'>>({});
+  const [filterTab, setFilterTab] = useState<FilterTab>('all');
 
   const fetchAll = useCallback(async () => {
     try {
@@ -37,8 +50,10 @@ export default function TaskQueue() {
         getTasks('REJECTED'),
         getTasks('FAILED'),
       ]);
-      setPending(pendingRes.tasks);
-      // Merge activity lists, most recent first
+      const pendingTasks = pendingRes.tasks;
+      setPending(pendingTasks);
+      onPendingCount?.(pendingTasks.length);
+
       const merged = [...executedRes.tasks, ...rejectedRes.tasks, ...failedRes.tasks]
         .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
       setActivity(merged);
@@ -48,7 +63,7 @@ export default function TaskQueue() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [onPendingCount]);
 
   useEffect(() => {
     setLoading(true);
@@ -81,6 +96,23 @@ export default function TaskQueue() {
     }
   };
 
+  // ── Counts per tab ─────────────────────────────────────────────────────────
+  const counts: Record<FilterTab, number> = {
+    all:      pending.length + activity.length,
+    pending:  pending.length,
+    executed: activity.filter((t) => t.status === 'EXECUTED').length,
+    failed:   activity.filter((t) => t.status === 'FAILED').length,
+    rejected: activity.filter((t) => t.status === 'REJECTED').length,
+  };
+
+  // ── Filtered views ─────────────────────────────────────────────────────────
+  const showPending  = filterTab === 'all' || filterTab === 'pending';
+  const showActivity = filterTab === 'all' || filterTab === 'executed' || filterTab === 'failed' || filterTab === 'rejected';
+
+  const visibleActivity = filterTab === 'all'
+    ? activity
+    : activity.filter((t) => t.status.toLowerCase() === filterTab);
+
   return (
     <div style={styles.container}>
       {/* Header */}
@@ -96,6 +128,28 @@ export default function TaskQueue() {
         </button>
       </div>
 
+      {/* Filter tabs */}
+      <div style={styles.filterBar}>
+        {(Object.keys(FILTER_LABELS) as FilterTab[]).map((tab) => (
+          <button
+            key={tab}
+            style={{ ...styles.filterTab, ...(filterTab === tab ? styles.filterTabActive : {}) }}
+            onClick={() => setFilterTab(tab)}
+          >
+            {FILTER_LABELS[tab]}
+            {!loading && counts[tab] > 0 && (
+              <span style={{
+                ...styles.filterCount,
+                ...(tab === 'pending' && counts.pending > 0 ? styles.filterCountPending : {}),
+                ...(tab === 'failed'  && counts.failed  > 0 ? styles.filterCountFailed  : {}),
+              }}>
+                {counts[tab]}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
       <div style={styles.scroll}>
         {/* Error banner */}
         {error && (
@@ -106,31 +160,29 @@ export default function TaskQueue() {
         )}
 
         {/* Pending section */}
-        <SectionHeader
-          title="Awaiting approval"
-          count={pending.length}
-          loading={loading}
-        />
-
-        {!loading && pending.length === 0 && (
-          <div style={styles.emptyState}>No pending tasks</div>
+        {showPending && (
+          <>
+            <SectionHeader title="Awaiting approval" count={pending.length} loading={loading} />
+            {!loading && pending.length === 0 && (
+              <div style={styles.emptyState}>No pending tasks</div>
+            )}
+            {pending.map((task) => (
+              <PendingCard
+                key={task.task_id}
+                task={task}
+                actionState={actioning[task.task_id]}
+                onApprove={() => void handleApprove(task.task_id)}
+                onReject={() => void handleReject(task.task_id)}
+              />
+            ))}
+          </>
         )}
 
-        {pending.map((task) => (
-          <PendingCard
-            key={task.task_id}
-            task={task}
-            actionState={actioning[task.task_id]}
-            onApprove={() => void handleApprove(task.task_id)}
-            onReject={() => void handleReject(task.task_id)}
-          />
-        ))}
-
         {/* Activity section */}
-        {activity.length > 0 && (
+        {showActivity && visibleActivity.length > 0 && (
           <>
-            <SectionHeader title="Recent activity" count={activity.length} />
-            {activity.slice(0, 20).map((task) => (
+            <SectionHeader title="Recent activity" count={visibleActivity.length} />
+            {visibleActivity.slice(0, 20).map((task) => (
               <ActivityRow
                 key={task.task_id}
                 task={task}
@@ -145,6 +197,11 @@ export default function TaskQueue() {
               />
             ))}
           </>
+        )}
+
+        {/* Empty state when filtered */}
+        {!loading && filterTab !== 'all' && counts[filterTab] === 0 && (
+          <div style={styles.emptyState}>No {FILTER_LABELS[filterTab].toLowerCase()} tasks</div>
         )}
       </div>
     </div>
@@ -198,22 +255,13 @@ function PendingCard({ task, actionState, onApprove, onReject }: PendingCardProp
       </div>
 
       <div style={styles.findingId}>Finding: {task.finding_id}</div>
-
       <div style={styles.rationale}>{task.rationale}</div>
 
       <div style={styles.actions}>
-        <button
-          onClick={onApprove}
-          disabled={isActioning}
-          style={styles.btnApprove}
-        >
+        <button onClick={onApprove} disabled={isActioning} style={styles.btnApprove}>
           {actionState === 'approving' ? 'Approving...' : 'Approve'}
         </button>
-        <button
-          onClick={onReject}
-          disabled={isActioning}
-          style={styles.btnReject}
-        >
+        <button onClick={onReject} disabled={isActioning} style={styles.btnReject}>
           {actionState === 'rejecting' ? 'Rejecting...' : 'Reject'}
         </button>
       </div>
@@ -226,7 +274,7 @@ function PendingCard({ task, actionState, onApprove, onReject }: PendingCardProp
 const STATUS_COLORS: Partial<Record<TaskStatus, string>> = {
   EXECUTED: 'var(--green)',
   REJECTED: 'var(--muted)',
-  FAILED: 'var(--red)',
+  FAILED:   'var(--red)',
 };
 
 const DISMISSIBLE: TaskStatus[] = ['FAILED', 'REJECTED'];
@@ -242,6 +290,7 @@ function ActivityRow({ task, dismissing, onDismiss }: {
   const canDismiss = DISMISSIBLE.includes(task.status);
   const label = resourceLabel(task.resource_id);
   const isArn = task.resource_id.startsWith('arn:aws:');
+
   return (
     <div style={{ ...styles.activityRow, flexDirection: 'column', alignItems: 'stretch' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -285,7 +334,6 @@ function ActivityRow({ task, dismissing, onDismiss }: {
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 function formatFailureReason(result: string): string {
-  // IAM denial: "...is not authorized to perform: cognito-idp:TagResource on resource:..."
   const match = result.match(/not authorized to perform:\s*(\S+)/);
   if (match) return `Permission denied: ${match[1]}`;
   return result;
@@ -333,7 +381,61 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--muted)',
     fontSize: 12,
     padding: '3px 10px',
+    borderRadius: 5,
+    cursor: 'pointer',
   },
+  // ── Filter tabs ─────────────────────────────────────────────────────────────
+  filterBar: {
+    display: 'flex',
+    gap: 0,
+    padding: '8px 12px',
+    borderBottom: '1px solid var(--border)',
+    background: 'var(--surface)',
+    flexShrink: 0,
+    overflowX: 'auto',
+  },
+  filterTab: {
+    background: 'transparent',
+    border: '1px solid transparent',
+    color: 'var(--muted)',
+    fontSize: 12,
+    fontWeight: 500,
+    padding: '4px 10px',
+    borderRadius: 5,
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    whiteSpace: 'nowrap' as const,
+    flexShrink: 0,
+  },
+  filterTabActive: {
+    background: 'var(--surface2)',
+    border: '1px solid var(--border)',
+    color: 'var(--text)',
+    fontWeight: 600,
+  },
+  filterCount: {
+    fontSize: 10,
+    fontWeight: 700,
+    borderRadius: 10,
+    padding: '1px 5px',
+    background: 'var(--surface2)',
+    color: 'var(--muted)',
+    border: '1px solid var(--border)',
+    lineHeight: 1.4,
+  },
+  filterCountPending: {
+    background: 'rgba(210, 153, 34, 0.15)',
+    color: 'var(--yellow)',
+    border: '1px solid rgba(210, 153, 34, 0.3)',
+  },
+  filterCountFailed: {
+    background: 'rgba(248, 81, 73, 0.1)',
+    color: 'var(--red)',
+    border: '1px solid rgba(248, 81, 73, 0.3)',
+  },
+  // ── Scroll area ──────────────────────────────────────────────────────────────
   scroll: {
     flex: 1,
     overflowY: 'auto',
@@ -532,6 +634,3 @@ const styles: Record<string, React.CSSProperties> = {
     wordBreak: 'break-word' as const,
   },
 };
-
-// Silence unused variable warning for destructured omit pattern
-void (ACTIVITY_STATUSES);
