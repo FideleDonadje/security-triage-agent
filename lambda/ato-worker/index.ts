@@ -146,7 +146,11 @@ async function processRecord(record: DynamoDBRecord): Promise<void> {
 // ── Core job processor ─────────────────────────────────────────────────────────
 
 async function processJob(jobId: string, username: string, standardsArn?: string): Promise<void> {
-  await markInProgress(jobId);
+  const claimed = await markInProgress(jobId);
+  if (!claimed) {
+    console.log('Job already claimed by another worker (duplicate stream delivery), skipping', { jobId });
+    return;
+  }
 
   // ── Step 1: Fetch Security Hub findings ──────────────────────────────────────
   console.log('Fetching Security Hub findings', { jobId, standardsArn });
@@ -451,15 +455,21 @@ async function writeReport(jobId: string, username: string, report: AtoReport): 
 
 // ── DynamoDB: job status helpers ──────────────────────────────────────────────
 
-async function markInProgress(jobId: string): Promise<void> {
-  await ddb.send(new UpdateCommand({
-    TableName: JOBS_TABLE,
-    Key: { jobId },
-    ConditionExpression: '#s = :pending',
-    UpdateExpression: 'SET #s = :inprogress',
-    ExpressionAttributeNames: { '#s': 'status' },
-    ExpressionAttributeValues: { ':pending': 'PENDING', ':inprogress': 'IN_PROGRESS' },
-  })).catch(ignoreConditionalCheckFailed);
+async function markInProgress(jobId: string): Promise<boolean> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: JOBS_TABLE,
+      Key: { jobId },
+      ConditionExpression: '#s = :pending',
+      UpdateExpression: 'SET #s = :inprogress',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: { ':pending': 'PENDING', ':inprogress': 'IN_PROGRESS' },
+    }));
+    return true;
+  } catch (e: unknown) {
+    if ((e as { name?: string }).name === 'ConditionalCheckFailedException') return false;
+    throw e;
+  }
 }
 
 async function markCompleted(jobId: string, resultS3Key: string): Promise<void> {

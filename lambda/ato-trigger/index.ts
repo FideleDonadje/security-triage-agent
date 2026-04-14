@@ -94,7 +94,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
     if (httpMethod === 'GET' && resource === '/ato/status/{jobId}') {
       const jobId = event.pathParameters?.jobId ?? '';
-      return withCors(await handleStatus(jobId));
+      return withCors(await handleStatus(jobId, email));
     }
     return withCors(err(404, `${httpMethod} ${resource} not found`));
   } catch (e: unknown) {
@@ -220,7 +220,7 @@ async function handleGenerate(event: APIGatewayProxyEvent, email: string): Promi
 
 // ── GET /ato/status/{jobId} ────────────────────────────────────────────────────
 
-async function handleStatus(jobId: string): Promise<APIGatewayProxyResult> {
+async function handleStatus(jobId: string, callerEmail: string): Promise<APIGatewayProxyResult> {
   if (!jobId) return err(400, 'jobId path parameter is required');
 
   const result = await ddb.send(new GetCommand({ TableName: JOBS_TABLE, Key: { jobId } }));
@@ -232,6 +232,9 @@ async function handleStatus(jobId: string): Promise<APIGatewayProxyResult> {
     error: string | null; resultS3Key: string;
     standardsArn?: string; standardName?: string;
   };
+
+  // Ownership check — prevent any authenticated user from reading another user's job
+  if (job.username !== callerEmail) return err(403, 'Forbidden');
 
   if (job.status === 'IN_PROGRESS') {
     const elapsed = Date.now() - new Date(job.startTime).getTime();

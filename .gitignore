@@ -31,6 +31,8 @@ frontend/dist/
 
 # ── Lambda build artefacts ─────────────────────────────────────────────────────
 lambda/*/dist/
+lambda/*/dist-bundle/
+lambda/*/*.zip
 
 # ── Local notes — not for source control ──────────────────────────────────────
 TODO.md
