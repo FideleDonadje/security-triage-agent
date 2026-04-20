@@ -3,13 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "tsc",
+    "build": "esbuild index.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/index.js --external:@aws-sdk/*",
     "watch": "tsc -w"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.145",
     "@types/node": "^22.0.0",
-    "typescript": "~5.7.0"
+    "typescript": "~5.7.0",
+    "esbuild": "^0.25.0"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.0.0",
