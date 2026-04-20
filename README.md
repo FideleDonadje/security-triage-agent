@@ -65,6 +65,10 @@ In a multi-account environment, Security Hub's aggregated view means the agent w
 
 ![Remediation summary](docs/screenshots/remediation-summary.png)
 
+**ATO Assist — NIST 800-53 Rev 5 compliance report with control family breakdown and POA&M:**
+
+![ATO Assist dashboard](docs/screenshots/ATO-Assist-dashbord.png)
+
 ---
 
 ## Architecture
