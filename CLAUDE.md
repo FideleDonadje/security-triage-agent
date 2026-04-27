@@ -6,13 +6,15 @@ Security Hub findings, remediate resources, and generate compliance documentatio
 It enriches findings with GuardDuty, Config, and CloudTrail context, queues
 remediation tasks for human approval, and executes safe actions autonomously.
 
-Two capabilities:
+Three capabilities:
 - **Triage Agent** — chat-based investigation and remediation (MVP)
-- **ATO Assist** — NIST 800-53 Rev 5 compliance report generation (in progress)
+- **ATO Assist** — legacy single-report NIST 800-53 generation (superseded by Compliance Workspace)
+- **Compliance Workspace** — full NIST RMF 7-step workflow with per-control SSP, POA&M, SAR, RA, ConMon, IRP generation
 
 Full design specs in `docs/`:
 - `docs/triage-agent-design.md`
 - `docs/ato-assist-design.md`
+- `docs/compliance-workspace-design.md`
 
 ---
 
@@ -91,11 +93,32 @@ Full design specs in `docs/`:
 - Writes structured JSON report to S3 (AtoReportsBucket)
 - Updates job status to COMPLETED or FAILED
 
+### Compliance Worker Lambda
+
+- Triggered by DynamoDB Streams on `security-triage-systems` when `status=PENDING`
+- Dispatches to per-document generators: SSP, POA&M, SAR, RA, ConMon, IRP
+- SSP generation: two-stage — Stage A pre-fills AWS-inherited controls (PE, MA) without Bedrock;
+  Stage B calls Bedrock per-family (chunked at 18 controls) with official NIST titles + SecurityHub status + CRM context
+- Baseline control lists sourced from official NIST SP 800-53B (207/345/428 for Low/Moderate/High)
+- AWS responsibility assignments from `aws-crm.ts` (based on AWS FedRAMP High P-ATO)
+- Writes JSON to S3, marks record COMPLETED; on failure marks FAILED
+- DLQ (SQS) catches repeated failures; `compliance-repair` Lambda recovers stuck jobs
+
+### Compliance Repair Lambda
+
+- Triggered on a schedule (EventBridge, every 5 minutes)
+- Scans `security-triage-systems` for records stuck IN_PROGRESS > 12 minutes → marks FAILED
+- Redrives DLQ messages for transient failures (up to 3 retries)
+
 ### Data
 - DynamoDB `security-triage-tasks` — triage task queue
 - DynamoDB `security-triage-ato-jobs` — ATO job lifecycle
+- DynamoDB `security-triage-systems` — compliance workspace: system metadata (METADATA sk),
+  FIPS 199 ratings (DOC#NIST#FIPS199 sk), document records (DOC#NIST#{TYPE} sk)
 - S3 `security-triage-access-logs-{account}-{region}` — S3 access logs from remediation
 - S3 `security-triage-ato-reports-{account}-{region}` — ATO JSON reports (90-day lifecycle)
+- S3 `security-triage-compliance-{account}-{region}` — compliance documents (versioned, 7-year retention)
+  Keys: `compliance/{systemId}/NIST/{docType}/current.json`
 
 ### Infrastructure
 - AWS CDK (TypeScript)
@@ -177,21 +200,21 @@ PENDING → CANCELLED              (agent retracts via cancel_task)
 
 ## AgentCore tools (read-only except queue_task and cancel_task)
 
-```
-get_findings            → Security Hub GetFindings
-get_threat_context      → GuardDuty ListFindings + GetFindings
-get_config_status       → Config DescribeComplianceByResource
-get_trail_events        → CloudTrail LookupEvents
-get_tag_compliance      → ResourceGroupsTaggingAPI GetResources (find resources missing required tags)
-get_enabled_standards   → Security Hub GetEnabledStandards + DescribeStandards
-get_compliance_report   → Security Hub DescribeStandardsControls + GetFindings (compliance posture by standard)
-get_iam_analysis        → IAM GetAccountSummary + GetCredentialReport + ListUsers
-get_access_analyzer     → AccessAnalyzer ListAnalyzers + ListFindings
-get_cost_analysis       → CostExplorer GetCostAndUsage + GetAnomalies
-queue_task              → DynamoDB PutItem (queue a remediation task)
-cancel_task             → DynamoDB UpdateItem PENDING→CANCELLED (retract a queued task)
-get_task_queue          → DynamoDB Query (read pending/recent tasks)
-```
+| Tool | AWS APIs | Notes |
+| --- | --- | --- |
+| `get_findings` | Security Hub GetFindings | Read-only |
+| `get_threat_context` | GuardDuty ListFindings + GetFindings | Read-only |
+| `get_config_status` | Config DescribeComplianceByResource | Read-only |
+| `get_trail_events` | CloudTrail LookupEvents | Read-only |
+| `get_tag_compliance` | ResourceGroupsTaggingAPI GetResources | Finds resources missing required tags |
+| `get_enabled_standards` | Security Hub GetEnabledStandards + DescribeStandards | Read-only |
+| `get_compliance_report` | Security Hub DescribeStandardsControls + GetFindings | Compliance posture by standard |
+| `get_iam_analysis` | IAM GetAccountSummary + GetCredentialReport + ListUsers | Read-only |
+| `get_access_analyzer` | AccessAnalyzer ListAnalyzers + ListFindings | Read-only |
+| `get_cost_analysis` | CostExplorer GetCostAndUsage + GetAnomalies | Read-only |
+| `queue_task` | DynamoDB PutItem | **Write** — queues a remediation task |
+| `cancel_task` | DynamoDB UpdateItem | **Write** — PENDING → CANCELLED |
+| `get_task_queue` | DynamoDB Query | Read pending/recent tasks |
 
 Required tag keys are stored in SSM at `/security-triage/required-tag-keys` as a JSON array.
 Default: `["Environment","Owner","Project"]`. Edit the parameter to change the policy without redeploying.

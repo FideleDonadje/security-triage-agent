@@ -23,6 +23,7 @@ import * as cdk from 'aws-cdk-lib';
 import { SecurityTriageStack } from '../lib/security-triage-stack';
 import { AgentStack } from '../lib/agent-stack';
 import { FrontendStack } from '../lib/frontend-stack';
+import { ComplianceStack } from '../lib/compliance-stack';
 
 const app = new cdk.App();
 
@@ -63,6 +64,18 @@ const agentStack = new AgentStack(app, 'SecurityTriageAgentStack', {
   statusIndexName: 'status-index',
 });
 agentStack.addDependency(mainStack);
+
+// 4. Compliance workspace — depends on SecurityTriageStack for apiLambda, api, cognitoAuthorizer
+const complianceStack = new ComplianceStack(app, 'SecurityTriageComplianceStack', {
+  env,
+  description: 'Security Triage — compliance workspace (systems table, document workers, S3)',
+  apiLambda:         mainStack.apiLambda,
+  cognitoAuthorizer: mainStack.cognitoAuthorizer,
+  api:               mainStack.api,
+  userPool:          mainStack.userPool,
+  frontendUrl,
+});
+// No explicit addDependency — CDK infers order from props.api / props.apiLambda references
 
 // ── Cost allocation + tracking tags on every resource ─────────────────────────
 cdk.Tags.of(app).add('project',     'security-triage-agent');

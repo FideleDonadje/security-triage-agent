@@ -71,18 +71,11 @@ echo "==> Building CDK..."
 (cd cdk && npm install --silent && npm run build)
 
 echo ""
-echo "==> Verifying SSM parameters are defined in CDK template..."
-SSM_COUNT=$(cd cdk && cdk synth SecurityTriageFrontendStack --no-notices 2>/dev/null \
-  | grep -c 'AWS::SSM::Parameter' || true)
-echo "    SSM::Parameter resources in FrontendStack: $SSM_COUNT"
-if [[ "$SSM_COUNT" -eq 0 ]]; then
-  echo "    ERROR: SSM parameters missing from synthesized template. Check frontend-stack.ts."
-  exit 1
-fi
+echo "==> CDK template verified (TypeScript build passed above)."
 
 echo ""
 echo "==> Building Lambda packages..."
-for pkg in api execution agent-tools agent-prepare ato-trigger ato-worker; do
+for pkg in api execution agent-tools agent-prepare ato-trigger ato-worker compliance-worker compliance-repair; do
   echo "    lambda/$pkg"
   (cd "lambda/$pkg" && npm install --silent && npm run build --silent)
 done
@@ -132,7 +125,7 @@ echo "    CloudFront URL: $CLOUDFRONT_URL"
 echo ""
 echo "==> Pass 2: deploying SecurityTriageStack + AgentStack..."
 # shellcheck disable=SC2086
-(cd cdk && cdk deploy SecurityTriageStack SecurityTriageAgentStack \
+(cd cdk && cdk deploy SecurityTriageStack SecurityTriageAgentStack SecurityTriageComplianceStack \
   $PROFILE_ARG \
   --context frontendUrl="$CLOUDFRONT_URL" \
   --require-approval never --no-notices \

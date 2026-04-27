@@ -4,6 +4,11 @@
   padding: 0;
 }
 
+@keyframes progress-slide {
+  0%   { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
 :root {
   --bg:       #0d1117;
   --surface:  #161b22;
@@ -16,6 +21,7 @@
   --yellow:   #d29922;
   --red:      #f85149;
   --purple:   #8957e5;
+  --shadow:   rgba(0, 0, 0, 0.45);
 
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial,
     sans-serif;
@@ -23,6 +29,23 @@
   line-height: 1.5;
   color: var(--text);
   background: var(--bg);
+}
+
+/* ── Light theme ──────────────────────────────────────────────────────────── */
+html[data-theme="light"] {
+  --bg:       #f6f8fa;
+  --surface:  #ffffff;
+  --surface2: #eaeef2;
+  --border:   #d0d7de;
+  --text:     #1a2744;
+  --muted:    #57606a;
+  --blue:     #0969da;
+  --green:    #1a7f37;
+  --yellow:   #9a6700;
+  --red:      #cf222e;
+  --purple:   #6639ba;
+  --shadow:   rgba(0, 0, 0, 0.12);
+  color-scheme: light;
 }
 
 body {

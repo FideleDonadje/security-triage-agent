@@ -1,23 +1,35 @@
 # cdk/
 
-AWS CDK v2 infrastructure — deploys all three stacks.
+AWS CDK v2 infrastructure — deploys all four stacks.
 
 ## Stacks
 
 | File | Stack | What it creates |
-|---|---|---|
+| --- | --- | --- |
 | `lib/security-triage-stack.ts` | `SecurityTriageStack` | Cognito, DynamoDB task table + ATO jobs table, API Lambda, Execution Lambda, ATO Trigger Lambda, ATO Worker Lambda, API Gateway, WAF, S3 buckets (access logs + ATO reports) |
 | `lib/agent-stack.ts` | `SecurityTriageAgentStack` | Bedrock Agent, action group Lambda, IAM roles, SSM parameters, auto-prepare custom resource |
+| `lib/compliance-stack.ts` | `SecurityTriageComplianceStack` | DynamoDB systems table, Compliance Worker Lambda, Compliance Repair Lambda, SQS DLQ, S3 compliance docs bucket, EventBridge rule (every 5 min) |
 | `lib/frontend-stack.ts` | `SecurityTriageFrontendStack` | S3 bucket, CloudFront distribution |
 
 ## Deploy order
 
-`SecurityTriageStack` must deploy before `SecurityTriageAgentStack` — the agent stack reads the DynamoDB table ARN from it.
+`SecurityTriageStack` must deploy before `SecurityTriageAgentStack` and `SecurityTriageComplianceStack` — both downstream stacks consume exports from it (DynamoDB ARNs, API Gateway, Cognito authorizer).
 
 ```bash
 # From repo root
 bash ./deploy.sh --profile myprofile --region us-east-1 --owner you@example.com
 ```
+
+## Key resources in ComplianceStack
+
+| Resource | Name / ID | Notes |
+| --- | --- | --- |
+| DynamoDB — systems | `security-triage-systems` | Composite key (pk=SYSTEM#id, sk=METADATA / DOC#NIST#TYPE); Streams enabled |
+| Compliance Worker Lambda | `security-triage-compliance-worker` | 12-min timeout, 1024MB, reservedConcurrency=5; generates SSP/POA&M/SAR/RA/ConMon/IRP |
+| Compliance Repair Lambda | `security-triage-compliance-repair` | Detects stuck IN_PROGRESS jobs (>12 min) and redrives DLQ failures (up to 3 retries) |
+| SQS DLQ | `security-triage-compliance-worker-dlq` | 14-day retention; triggers Repair Lambda |
+| S3 — compliance docs | `security-triage-compliance-{account}-{region}` | Versioned; non-current versions expire 90 days, current expires 7 years |
+| EventBridge rule | (schedule) | Fires every 5 minutes → Repair Lambda |
 
 ## Key resources in SecurityTriageStack
 

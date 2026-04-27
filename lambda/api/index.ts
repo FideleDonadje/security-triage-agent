@@ -2,13 +2,21 @@ import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { validateToken } from './auth';
 import { handleChat, handleChatResult, handleChatWorker, type ChatWorkerEvent } from './chat';
 import { handleApproveTask, handleDismissTask, handleGetTasks, handleRejectTask } from './tasks';
+import {
+  handleGetSystem,
+  handleUpdateSettings,
+  handleListDocuments,
+  handleSaveFips199,
+  handleGenerateDocument,
+  handleGetDocument,
+} from './compliance';
 
 // Set ALLOWED_ORIGIN env var on this Lambda to your CloudFront URL.
 // Falls back to '*' only when the variable is absent (local dev / CI).
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': process.env.ALLOWED_ORIGIN ?? '*',
   'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-  'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
+  'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
 };
 
 export const handler = async (
@@ -46,6 +54,18 @@ export const handler = async (
       response = await handleRejectTask(event, auth);
     } else if (httpMethod === 'DELETE' && resource === '/tasks/{task_id}') {
       response = await handleDismissTask(event, auth);
+    } else if (httpMethod === 'GET' && resource === '/systems/{systemId}') {
+      response = await handleGetSystem(event, auth);
+    } else if (httpMethod === 'PUT' && resource === '/systems/{systemId}/settings') {
+      response = await handleUpdateSettings(event, auth);
+    } else if (httpMethod === 'GET' && resource === '/systems/{systemId}/documents') {
+      response = await handleListDocuments(event, auth);
+    } else if (httpMethod === 'PUT' && resource === '/systems/{systemId}/documents/FIPS199') {
+      response = await handleSaveFips199(event, auth);
+    } else if (httpMethod === 'POST' && resource === '/systems/{systemId}/documents/{docType}/generate') {
+      response = await handleGenerateDocument(event, auth);
+    } else if (httpMethod === 'GET' && resource === '/systems/{systemId}/documents/{docType}') {
+      response = await handleGetDocument(event, auth);
     } else {
       response = {
         statusCode: 404,
