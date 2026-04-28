@@ -4,7 +4,9 @@
       "Bash(node -e ' *)",
       "Bash(curl -sL -o \"d:/Projects/security-triage-agent/lambda/compliance-worker/sp800-53b.xlsx\" \"https://csrc.nist.gov/files/pubs/sp/800/53/b/upd1/final/docs/sp800-53b-control-baselines.xlsx\")",
       "Bash(curl -sL -o \"d:/Projects/security-triage-agent/lambda/compliance-worker/sp800-53r5-controls.xlsx\" \"https://csrc.nist.gov/files/pubs/sp/800/53/r5/upd1/final/docs/sp800-53r5-controls.xlsx\")",
-      "Bash(grep -n \"'\\\\\\\\*'\" /d/Projects/security-triage-agent/cdk/lib/*.ts)"
+      "Bash(grep -n \"'\\\\\\\\*'\" /d/Projects/security-triage-agent/cdk/lib/*.ts)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(curl -s https://raw.githubusercontent.com/FideleDonadje/security-triage-agent/main/README.md)"
     ]
   },
   "hooks": {

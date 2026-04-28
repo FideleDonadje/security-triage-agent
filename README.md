@@ -6,7 +6,8 @@
 ![IaC](https://img.shields.io/badge/IaC-AWS%20CDK-232F3E?logo=amazonaws&logoColor=white)
 ![Frontend](https://img.shields.io/badge/Frontend-React%20%2B%20Vite-61DAFB?logo=react&logoColor=black)
 ![TypeScript](https://img.shields.io/badge/Language-TypeScript-3178C6?logo=typescript&logoColor=white)
-![Status](https://img.shields.io/badge/Status-MVP%20in%20progress-yellow)
+![Status](https://img.shields.io/badge/Status-Complete-brightgreen)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 An AI-powered AWS security operations platform built on Bedrock AgentCore and Claude Sonnet. Three capabilities:
 
@@ -50,23 +51,31 @@ In a multi-account environment, Security Hub's aggregated view means the agent w
 
 ## Screenshots
 
-**Agent introduction — what it is and what it can do:**
+**Triage Agent — task queue with 8 pending remediations and agent introducing its capabilities:**
 
-![Agent capabilities](docs/screenshots/capabilities.png)
+![Triage Agent overview](docs/screenshots/triage-agent-capabilities.png)
 
-**Findings scan — 94 issues triaged by severity with remediation plan:**
+**Security posture analysis — agent synthesises findings across Security Hub, GuardDuty, Config, IAM, and cost anomalies:**
 
-![Findings summary](docs/screenshots/findings-summary.png)
+![Security posture analysis](docs/screenshots/triage-agent-capabilities-security-posture.png)
 
-**Task queue — 22 remediations awaiting analyst approval:**
+**Task queue — pending tag_resource remediations awaiting analyst approval, account IDs masked by default:**
 
-![Task queue with pending approvals](docs/screenshots/task-queue.png)
+![Task queue pending approvals](docs/screenshots/triage-agent-tasks-queue.png)
 
-**Remediation summary — 24 tasks queued across S3 logging and resource tagging:**
+**Compliance Workspace — NIST RMF 7-step progress overview, all steps complete:**
 
-![Remediation summary](docs/screenshots/remediation-summary.png)
+![Compliance Workspace overview](docs/screenshots/compliance-workspace.png)
 
-**ATO Assist — NIST 800-53 Rev 5 compliance report with control family breakdown and POA&M:**
+**FIPS 199 categorization — Moderate impact (C/I/A) mapped to 345 NIST SP 800-53 controls:**
+
+![FIPS 199 and control baseline](docs/screenshots/compliance-workspace-expanded-1.png)
+
+**All 6 RMF documents generated and ready — SSP, SAR, Risk Assessment, POA&M, ConMon Plan, and IRP with generation timestamps:**
+
+![RMF documents ready](docs/screenshots/compliance-workspace-expanded-2.png)
+
+**ATO Report Generator — NIST SP 800-53 Rev 5: 1,831 findings, 68% pass rate, AC family with POA&M entries:**
 
 ![ATO Assist dashboard](docs/screenshots/ATO-Assist-dashbord.png)
 
@@ -466,7 +475,7 @@ cd cdk && cdk import SecurityTriageStack
 
 ---
 
-## Testing — three MVP scenarios
+## Testing
 
 ### Scenario 1 — Agent greeting and first investigation
 
@@ -519,7 +528,28 @@ cd cdk && cdk import SecurityTriageStack
 
 > **Note:** This requires NIST 800-53 to be enabled in Security Hub. Run `get_enabled_standards` first to confirm which standards are active in your account.
 
-If all six scenarios work, the MVP is complete.
+If all six scenarios work, the triage and ATO features are complete.
+
+### Scenario 7 — Compliance Workspace: FIPS 199 categorization
+
+1. Navigate to the **Compliance** tab.
+2. Open **Step 1 — Categorize** and select impact levels for Confidentiality, Integrity, and Availability.
+3. Click **Save**.
+4. **Expected:** The overall system impact level updates (e.g. Moderate) and all 20 control families are displayed with their assigned impact levels.
+
+### Scenario 8 — Generate an SSP
+
+1. Navigate to **Compliance** → **Step 2 — Select** and confirm the baseline (e.g. Moderate — 345 controls).
+2. Open **Step 3 — Implement** → expand **System Security Plan (SSP)** → click **Generate**.
+3. **Expected:** A progress bar appears with elapsed time. The worker calls Bedrock per control family, then marks the document COMPLETED with a **Last generated** timestamp and duration.
+4. Click **View** on the completed SSP.
+5. **Expected:** The document opens showing 345 controls, a color-coded status bar (Implemented / Partial+Planned / Inherited / N/A), and all AWS-inherited controls (Physical Environment, Maintenance) pre-filled without Bedrock calls.
+
+### Scenario 9 — Export a POA&M
+
+1. In the Compliance Workspace, generate the **POA&M** document (same flow as SSP).
+2. Click **View** on the completed POA&M, then click **Export Excel**.
+3. **Expected:** An `.xlsx` file downloads with one row per failing control, including columns for control ID, weakness description, risk level, and planned remediation date.
 
 ---
 
