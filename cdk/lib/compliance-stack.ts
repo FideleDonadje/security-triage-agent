@@ -313,7 +313,7 @@ export class ComplianceStack extends cdk.Stack {
       environment: {
         SYSTEMS_TABLE_NAME:  this.systemsTable.tableName,
         STATUS_INDEX_NAME:   'status-all-index',
-        STUCK_THRESHOLD_MIN: '12',
+        STUCK_THRESHOLD_MIN: '16',
         REGION:              this.region,
       },
     });

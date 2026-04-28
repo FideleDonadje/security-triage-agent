@@ -259,8 +259,15 @@ function SspRenderer({ data }: { data: Record<string, unknown> }) {
 // ── POAM-specific renderer ─────────────────────────────────────────────────────
 
 function PoamRenderer({ data }: { data: Record<string, unknown> }) {
-  const entries = (data['poamEntries'] ?? data['entries'] ?? []) as Record<string, unknown>[];
-  const summary = (data['executiveSummary'] ?? data['summary']) as string | undefined;
+  const rawFamilies = data['controlFamilies'] as Record<string, unknown>[] | undefined;
+  const entries = (
+    data['poamEntries'] ??
+    data['entries'] ??
+    rawFamilies?.flatMap((cf) => (cf['poamEntries'] as Record<string, unknown>[] | undefined) ?? []) ??
+    []
+  ) as Record<string, unknown>[];
+  const summaryObj = data['summary'] as Record<string, unknown> | undefined;
+  const summary = (data['executiveSummary'] ?? (summaryObj && typeof summaryObj === 'object' ? undefined : summaryObj)) as string | undefined;
 
   return (
     <div style={styles.sections}>
@@ -440,8 +447,13 @@ function exportToExcel(docType: string, label: string, data: Record<string, unkn
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(controlRows), 'Controls');
     }
   } else if (docType === 'POAM') {
-    // Data shape: flat poamEntries array (matches PoamRenderer)
-    const raw = (data['poamEntries'] ?? data['entries'] ?? []) as Record<string, unknown>[];
+    const poamFamilies = data['controlFamilies'] as Record<string, unknown>[] | undefined;
+    const raw = (
+      data['poamEntries'] ??
+      data['entries'] ??
+      poamFamilies?.flatMap((cf) => (cf['poamEntries'] as Record<string, unknown>[] | undefined) ?? []) ??
+      []
+    ) as Record<string, unknown>[];
     const entries: Record<string, string>[] = raw.map((e) => ({
       'POA&M ID':              String(e['poamId'] ?? ''),
       'Weakness / Finding':    String(e['weakness'] ?? e['title'] ?? e['description'] ?? ''),

@@ -186,8 +186,8 @@ export async function handleGenerateDocument(
     await ddb.send(new UpdateCommand({
       TableName:                 SYSTEMS_TABLE,
       Key:                       { pk, sk },
-      // Block double-submit: don't allow triggering while already IN_PROGRESS
-      ConditionExpression:       '#s <> :inprogress',
+      // Block double-submit: allow new items (attribute_not_exists) and non-IN_PROGRESS items
+      ConditionExpression:       'attribute_not_exists(#s) OR #s <> :inprogress',
       UpdateExpression:          'SET #s = :pending, generationId = :genId, generatedBy = :email, generationStartedAt = :now',
       ExpressionAttributeNames:  { '#s': 'status' },
       ExpressionAttributeValues: {

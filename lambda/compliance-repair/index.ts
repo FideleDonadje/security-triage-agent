@@ -18,7 +18,7 @@ import type { SQSEvent, SQSRecord, ScheduledEvent } from 'aws-lambda';
 const REGION              = process.env.REGION ?? process.env.AWS_REGION ?? 'us-east-1';
 const SYSTEMS_TABLE       = process.env.SYSTEMS_TABLE_NAME!;
 const STATUS_INDEX_NAME   = process.env.STATUS_INDEX_NAME ?? 'status-all-index';
-const STUCK_THRESHOLD_MIN = parseInt(process.env.STUCK_THRESHOLD_MIN ?? '12', 10);
+const STUCK_THRESHOLD_MIN = parseInt(process.env.STUCK_THRESHOLD_MIN ?? '16', 10);
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), {
   marshallOptions: { removeUndefinedValues: true },
