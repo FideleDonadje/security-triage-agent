@@ -16,6 +16,12 @@ function resourceLabel(resourceId: string): string {
   return withoutPrefix || resourceId;
 }
 
+// Replace 12-digit AWS account IDs with ****XXXX (last 4 visible for identification)
+function maskId(text: string, reveal: boolean): string {
+  if (reveal) return text;
+  return text.replace(/\b(\d{8})(\d{4})\b/g, '****$2');
+}
+
 // ── Filter tabs ───────────────────────────────────────────────────────────────
 
 type FilterTab = 'all' | 'pending' | 'executed' | 'failed' | 'rejected';
@@ -41,6 +47,7 @@ export default function TaskQueue({ onPendingCount }: TaskQueueProps) {
   const [error,     setError]     = useState<string | null>(null);
   const [actioning, setActioning] = useState<Record<string, 'approving' | 'rejecting' | 'dismissing'>>({});
   const [filterTab, setFilterTab] = useState<FilterTab>('all');
+  const [showIds,   setShowIds]   = useState(false);
 
   const fetchAll = useCallback(async () => {
     try {
@@ -118,14 +125,23 @@ export default function TaskQueue({ onPendingCount }: TaskQueueProps) {
       {/* Header */}
       <div style={styles.panelHeader}>
         <span style={styles.panelTitle}>Task Queue</span>
-        <button
-          onClick={() => { setLoading(true); void fetchAll(); }}
-          disabled={loading}
-          style={styles.refreshBtn}
-          title="Refresh"
-        >
-          {loading ? '...' : 'Refresh'}
-        </button>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            onClick={() => setShowIds((v) => !v)}
+            style={styles.refreshBtn}
+            title={showIds ? 'Mask account IDs' : 'Reveal account IDs'}
+          >
+            {showIds ? 'Hide IDs' : 'Show IDs'}
+          </button>
+          <button
+            onClick={() => { setLoading(true); void fetchAll(); }}
+            disabled={loading}
+            style={styles.refreshBtn}
+            title="Refresh"
+          >
+            {loading ? '...' : 'Refresh'}
+          </button>
+        </div>
       </div>
 
       {/* Filter tabs */}
@@ -171,6 +187,7 @@ export default function TaskQueue({ onPendingCount }: TaskQueueProps) {
                 key={task.task_id}
                 task={task}
                 actionState={actioning[task.task_id]}
+                showIds={showIds}
                 onApprove={() => void handleApprove(task.task_id)}
                 onReject={() => void handleReject(task.task_id)}
               />
@@ -186,6 +203,7 @@ export default function TaskQueue({ onPendingCount }: TaskQueueProps) {
               <ActivityRow
                 key={task.task_id}
                 task={task}
+                showIds={showIds}
                 dismissing={actioning[task.task_id] === 'dismissing'}
                 onDismiss={() => {
                   setActioning((prev) => ({ ...prev, [task.task_id]: 'dismissing' }));
@@ -226,14 +244,16 @@ function SectionHeader({ title, count, loading }: { title: string; count: number
 interface PendingCardProps {
   task: Task;
   actionState?: 'approving' | 'rejecting' | 'dismissing';
+  showIds: boolean;
   onApprove: () => void;
   onReject: () => void;
 }
 
-function PendingCard({ task, actionState, onApprove, onReject }: PendingCardProps) {
+function PendingCard({ task, actionState, showIds, onApprove, onReject }: PendingCardProps) {
   const isActioning = !!actionState;
   const [expanded, setExpanded] = useState(false);
-  const label = resourceLabel(task.resource_id);
+  const label = maskId(resourceLabel(task.resource_id), showIds);
+  const fullId = maskId(task.resource_id, showIds);
   const isArn = task.resource_id.startsWith('arn:aws:');
 
   return (
@@ -245,17 +265,17 @@ function PendingCard({ task, actionState, onApprove, onReject }: PendingCardProp
 
       <div
         style={{ ...styles.resource, ...(isArn ? { cursor: 'pointer' } : {}), ...(expanded ? { whiteSpace: 'normal' as const, overflow: 'visible' } : {}) }}
-        title={expanded ? 'Click to collapse' : task.resource_id}
+        title={expanded ? 'Click to collapse' : fullId}
         onClick={() => isArn && setExpanded((v) => !v)}
       >
-        {expanded ? task.resource_id : label}
-        {isArn && !expanded && label !== task.resource_id && (
+        {expanded ? fullId : label}
+        {isArn && !expanded && label !== fullId && (
           <span style={styles.expandHint}> ↗</span>
         )}
       </div>
 
       <div style={styles.findingId}>Finding: {task.finding_id}</div>
-      <div style={styles.rationale}>{task.rationale}</div>
+      <div style={styles.rationale}>{maskId(task.rationale, showIds)}</div>
 
       <div style={styles.actions}>
         <button onClick={onApprove} disabled={isActioning} style={styles.btnApprove}>
@@ -279,8 +299,9 @@ const STATUS_COLORS: Partial<Record<TaskStatus, string>> = {
 
 const DISMISSIBLE: TaskStatus[] = ['FAILED', 'REJECTED'];
 
-function ActivityRow({ task, dismissing, onDismiss }: {
+function ActivityRow({ task, showIds, dismissing, onDismiss }: {
   task: Task;
+  showIds: boolean;
   dismissing: boolean;
   onDismiss: () => void;
 }) {
@@ -288,7 +309,8 @@ function ActivityRow({ task, dismissing, onDismiss }: {
   const color = STATUS_COLORS[task.status] ?? 'var(--muted)';
   const isFailed = task.status === 'FAILED';
   const canDismiss = DISMISSIBLE.includes(task.status);
-  const label = resourceLabel(task.resource_id);
+  const label = maskId(resourceLabel(task.resource_id), showIds);
+  const fullId = maskId(task.resource_id, showIds);
   const isArn = task.resource_id.startsWith('arn:aws:');
 
   return (
@@ -299,11 +321,11 @@ function ActivityRow({ task, dismissing, onDismiss }: {
           <span style={styles.activityAction}>{ACTION_LABELS[task.action] ?? task.action}</span>
           <span
             style={{ ...styles.activityResource, ...(isArn ? { cursor: 'pointer' } : {}), whiteSpace: expanded ? 'normal' as const : 'nowrap' as const }}
-            title={expanded ? 'Click to collapse' : task.resource_id}
+            title={expanded ? 'Click to collapse' : fullId}
             onClick={() => isArn && setExpanded((v) => !v)}
           >
-            {expanded ? task.resource_id : label}
-            {isArn && !expanded && label !== task.resource_id && (
+            {expanded ? fullId : label}
+            {isArn && !expanded && label !== fullId && (
               <span style={styles.expandHint}> ↗</span>
             )}
           </span>

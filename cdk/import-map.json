@@ -1,0 +1,8 @@
+{
+  "SecurityTriageComplianceStack/SystemsTable/Resource": {
+    "TableName": "security-triage-systems"
+  },
+  "SecurityTriageComplianceStack/ComplianceReportsBucket/Resource": {
+    "BucketName": "security-triage-compliance-898319808197-us-east-1"
+  }
+}

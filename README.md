@@ -6,12 +6,14 @@
 ![IaC](https://img.shields.io/badge/IaC-AWS%20CDK-232F3E?logo=amazonaws&logoColor=white)
 ![Frontend](https://img.shields.io/badge/Frontend-React%20%2B%20Vite-61DAFB?logo=react&logoColor=black)
 ![TypeScript](https://img.shields.io/badge/Language-TypeScript-3178C6?logo=typescript&logoColor=white)
-![Status](https://img.shields.io/badge/Status-MVP%20in%20progress-yellow)
+![Status](https://img.shields.io/badge/Status-Complete-brightgreen)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-An AI-powered AWS security operations platform built on Bedrock AgentCore and Claude Sonnet. Two capabilities:
+An AI-powered AWS security operations platform built on Bedrock AgentCore and Claude Sonnet. Three capabilities:
 
 - **Triage Agent** — analysts chat in plain English to investigate Security Hub findings. The agent enriches them with GuardDuty, Config, and CloudTrail context, proposes remediation tasks with rationale, and executes them only after explicit human approval.
 - **ATO Assist** — generates NIST 800-53 Rev 5 compliance reports from Security Hub findings. Bedrock writes a risk assessment, implementation statement, and POA&M entries for each failing control family. Reports export to Excel and are retained in S3 for 7 years.
+- **Compliance Workspace** — full NIST RMF 7-step workflow. Generates SSP, POA&M, SAR, Risk Assessment, ConMon Plan, and IRP documents from live AWS data. Uses the official NIST SP 800-53B baselines (207/345/428 controls for Low/Moderate/High) and AWS FedRAMP CRM to pre-fill inherited controls without Bedrock calls.
 
 ---
 
@@ -49,23 +51,31 @@ In a multi-account environment, Security Hub's aggregated view means the agent w
 
 ## Screenshots
 
-**Agent introduction — what it is and what it can do:**
+**Triage Agent — task queue with 8 pending remediations and agent introducing its capabilities:**
 
-![Agent capabilities](docs/screenshots/capabilities.png)
+![Triage Agent overview](docs/screenshots/triage-agent-capabilities.png)
 
-**Findings scan — 94 issues triaged by severity with remediation plan:**
+**Security posture analysis — agent synthesises findings across Security Hub, GuardDuty, Config, IAM, and cost anomalies:**
 
-![Findings summary](docs/screenshots/findings-summary.png)
+![Security posture analysis](docs/screenshots/triage-agent-capabilities-security-posture.png)
 
-**Task queue — 22 remediations awaiting analyst approval:**
+**Task queue — pending tag_resource remediations awaiting analyst approval, account IDs masked by default:**
 
-![Task queue with pending approvals](docs/screenshots/task-queue.png)
+![Task queue pending approvals](docs/screenshots/triage-agent-tasks-queue.png)
 
-**Remediation summary — 24 tasks queued across S3 logging and resource tagging:**
+**Compliance Workspace — NIST RMF 7-step progress overview, all steps complete:**
 
-![Remediation summary](docs/screenshots/remediation-summary.png)
+![Compliance Workspace overview](docs/screenshots/compliance-workspace.png)
 
-**ATO Assist — NIST 800-53 Rev 5 compliance report with control family breakdown and POA&M:**
+**FIPS 199 categorization — Moderate impact (C/I/A) mapped to 345 NIST SP 800-53 controls:**
+
+![FIPS 199 and control baseline](docs/screenshots/compliance-workspace-expanded-1.png)
+
+**All 6 RMF documents generated and ready — SSP, SAR, Risk Assessment, POA&M, ConMon Plan, and IRP with generation timestamps:**
+
+![RMF documents ready](docs/screenshots/compliance-workspace-expanded-2.png)
+
+**ATO Report Generator — NIST SP 800-53 Rev 5: 1,831 findings, 68% pass rate, AC family with POA&M entries:**
 
 ![ATO Assist dashboard](docs/screenshots/ATO-Assist-dashbord.png)
 
@@ -110,6 +120,7 @@ flowchart TB
     subgraph datalayer[" Data "]
         DDB[("DynamoDB\ntask queue")]
         AtoDB[("DynamoDB\nATO jobs")]
+        SystemsDB[("DynamoDB\nsystems + docs")]
         SSM["SSM Parameter Store\nagent ID wiring"]
     end
 
@@ -119,6 +130,13 @@ flowchart TB
         AtoWorker --> AtoS3
     end
 
+    subgraph compliancelayer[" Compliance Workspace — separate IAM role "]
+        ComplianceWorker["Compliance Worker Lambda\nSSP · POA&M · SAR · RA · ConMon · IRP"]
+        ComplianceRepair["Repair Lambda\nstuck-job detection · DLQ redrive"]
+        ComplianceS3[("S3\ncompliance docs\n7-year retention")]
+        ComplianceWorker --> ComplianceS3
+    end
+
     subgraph executionlayer[" Execution — separate IAM role "]
         ExecLambda["Execution Lambda"]
         ExecS3["S3\nPutBucketLogging\nTagResources"]
@@ -126,12 +144,14 @@ flowchart TB
     end
 
     CW["CloudWatch\n90-day audit trail"]
+    EB["EventBridge\nevery 5 min"]
 
     UI <-->|"PKCE auth"| Cognito
     UI -->|"HTTPS"| CF --> WAF
 
     NodeLambda -->|"task CRUD"| DDB
     NodeLambda -->|"chat proxy"| AgentCore
+    NodeLambda -->|"compliance routes"| SystemsDB
 
     AgentCore -->|"read-only"| SH & GD & CT & Cfg
     AgentCore -->|"queue_task · agent's only write"| DDB
@@ -144,7 +164,12 @@ flowchart TB
     AtoWorker -->|"read findings"| SH
     AtoWorker -->|"generate narratives"| AgentCore
 
-    NodeLambda & AgentCore & ExecLambda & AtoWorker --> CW
+    SystemsDB -->|"stream · status = PENDING"| ComplianceWorker
+    ComplianceWorker -->|"read findings"| SH
+    EB -->|"every 5 min"| ComplianceRepair
+    ComplianceRepair -->|"mark stuck jobs FAILED"| SystemsDB
+
+    NodeLambda & AgentCore & ExecLambda & AtoWorker & ComplianceWorker --> CW
     AgentCore -.->|"reads agent ID at cold start"| SSM
 ```
 
@@ -195,13 +220,14 @@ flowchart TB
 │   └── lib/
 │       ├── security-triage-stack.ts  # Core: Cognito, DynamoDB, Lambdas, API GW, WAF, S3
 │       ├── agent-stack.ts            # Bedrock AgentCore IAM role + auto-prepare resource
+│       ├── compliance-stack.ts       # Compliance Workspace: systems table, worker + repair Lambdas, S3, SQS DLQ, EventBridge
 │       └── frontend-stack.ts         # S3 + CloudFront for React SPA
 ├── lambda/
 │   ├── api/                      # Node.js API layer
 │   │   ├── index.ts              # Handler entry point + CORS
 │   │   ├── auth.ts               # Cognito JWT validation
 │   │   ├── chat.ts               # Async Bedrock AgentCore proxy (POST→202, GET poll)
-│   │   └── tasks.ts              # Task queue CRUD
+│   │   └── tasks.ts              # Task queue CRUD + compliance workspace routes
 │   ├── agent-tools/              # Bedrock action group handler
 │   │   └── index.ts              # get_findings, get_threat_context, get_tag_compliance,
 │   │                             #   get_enabled_standards, get_compliance_report,
@@ -214,8 +240,12 @@ flowchart TB
 │   │   └── apply-tags.ts         # ResourceGroupsTaggingAPI TagResources
 │   ├── ato-trigger/              # ATO Assist API handler
 │   │   └── index.ts              # /ato/standards, /ato/generate, /ato/status, /ato/jobs
-│   └── ato-worker/               # ATO Assist background processor
-│       └── index.ts              # Security Hub → group by NIST family → Bedrock → S3
+│   ├── ato-worker/               # ATO Assist background processor
+│   │   └── index.ts              # Security Hub → group by NIST family → Bedrock → S3
+│   └── compliance-worker/        # Compliance Workspace document generator
+│       ├── index.ts              # Stream handler → dispatches to SSP/POA&M/SAR/RA/ConMon/IRP generators
+│       ├── nist-catalog.ts       # Official NIST SP 800-53B baseline lists + SP 800-53r5 titles (207/345/428)
+│       └── aws-crm.ts            # AWS FedRAMP High CRM: PE/MA inherited, SC/CM/CP shared responsibility
 ├── frontend/                     # React + Vite SPA
 │   ├── src/
 │   │   ├── App.tsx               # Shell: header with avatar dropdown + tab nav
@@ -223,9 +253,10 @@ flowchart TB
 │   │   │   ├── Chat.tsx          # Chat panel (right side of Triage tab)
 │   │   │   ├── TaskQueue.tsx     # Task queue panel (left side of Triage tab)
 │   │   │   │                     #   filter tabs, pending count badge, approve/reject
-│   │   │   └── AtoAssist.tsx     # ATO report panel (ATO Assist tab)
-│   │   │                         #   standards dropdown, job history sidebar, report view,
-│   │   │                         #   progress card with elapsed timer, Export POAM button
+│   │   │   ├── AtoAssist.tsx     # ATO report panel (ATO Assist tab)
+│   │   │   │                     #   standards dropdown, job history sidebar, report view,
+│   │   │   │                     #   progress card with elapsed timer, Export POAM button
+│   │   │   └── DocumentViewer.tsx # Compliance document renderer: SSP control table, Excel export
 │   │   └── lib/
 │   │       ├── auth.ts           # Cognito PKCE auth flow
 │   │       ├── api.ts            # API Gateway client + all type definitions
@@ -244,12 +275,12 @@ flowchart TB
 | Auth | Amazon Cognito — PKCE authorization code flow |
 | API | API Gateway + Node.js 22 Lambda |
 | Agent | AWS Bedrock AgentCore, Claude Sonnet 4.5 |
-| Compliance AI | Bedrock InvokeModel (Claude Sonnet) via ATO Worker Lambda |
-| Database | DynamoDB — task queue table + ATO jobs table |
-| Storage | S3 + CloudFront; ATO reports bucket (Glacier after 1yr, deleted after 7yr) |
-| Security | WAF (OWASP rules + rate limiting) |
-| Observability | CloudWatch (90-day log retention) |
-| Frontend | React + Vite, SheetJS for POAM Excel export |
+| Compliance AI | Bedrock InvokeModel (Claude Sonnet) via Compliance Worker + ATO Worker Lambdas |
+| Database | DynamoDB — task queue table, ATO jobs table, systems + compliance docs table |
+| Storage | S3 + CloudFront; ATO reports bucket (Glacier after 1yr, 7yr expiry); compliance docs bucket (versioned, 7yr retention) |
+| Security | WAF (OWASP rules + rate limiting), SQS DLQ for compliance worker failures |
+| Observability | CloudWatch (90-day log retention), EventBridge (stuck-job detection every 5 min) |
+| Frontend | React + Vite, SheetJS for POAM + SSP Excel export |
 
 ---
 
@@ -429,10 +460,12 @@ The following resources survive `cdk destroy` to protect against accidental data
 | --- | --- | --- |
 | DynamoDB — task queue | `security-triage-tasks` | `aws dynamodb delete-table --table-name security-triage-tasks` |
 | DynamoDB — ATO jobs | `security-triage-ato-jobs` | `aws dynamodb delete-table --table-name security-triage-ato-jobs` |
+| DynamoDB — systems | `security-triage-systems` | `aws dynamodb delete-table --table-name security-triage-systems` |
 | Cognito User Pool | `security-triage-analysts` | Console or `aws cognito-idp delete-user-pool --user-pool-id <id>` |
 | S3 frontend bucket | `securitytriagefrontendstack-frontendbucket-*` | Empty then delete via console or CLI |
 | S3 access logs bucket | `security-triage-access-logs-{account}-{region}` | Empty then delete via console or CLI |
 | S3 ATO reports bucket | `security-triage-ato-reports-{account}-{region}` | Empty then delete via console or CLI |
+| S3 compliance docs bucket | `security-triage-compliance-{account}-{region}` | Empty then delete via console or CLI |
 
 If a **failed deploy** rolls back and leaves these resources, re-adopt them without data loss:
 
@@ -442,7 +475,7 @@ cd cdk && cdk import SecurityTriageStack
 
 ---
 
-## Testing — three MVP scenarios
+## Testing
 
 ### Scenario 1 — Agent greeting and first investigation
 
@@ -495,7 +528,28 @@ cd cdk && cdk import SecurityTriageStack
 
 > **Note:** This requires NIST 800-53 to be enabled in Security Hub. Run `get_enabled_standards` first to confirm which standards are active in your account.
 
-If all six scenarios work, the MVP is complete.
+If all six scenarios work, the triage and ATO features are complete.
+
+### Scenario 7 — Compliance Workspace: FIPS 199 categorization
+
+1. Navigate to the **Compliance** tab.
+2. Open **Step 1 — Categorize** and select impact levels for Confidentiality, Integrity, and Availability.
+3. Click **Save**.
+4. **Expected:** The overall system impact level updates (e.g. Moderate) and all 20 control families are displayed with their assigned impact levels.
+
+### Scenario 8 — Generate an SSP
+
+1. Navigate to **Compliance** → **Step 2 — Select** and confirm the baseline (e.g. Moderate — 345 controls).
+2. Open **Step 3 — Implement** → expand **System Security Plan (SSP)** → click **Generate**.
+3. **Expected:** A progress bar appears with elapsed time. The worker calls Bedrock per control family, then marks the document COMPLETED with a **Last generated** timestamp and duration.
+4. Click **View** on the completed SSP.
+5. **Expected:** The document opens showing 345 controls, a color-coded status bar (Implemented / Partial+Planned / Inherited / N/A), and all AWS-inherited controls (Physical Environment, Maintenance) pre-filled without Bedrock calls.
+
+### Scenario 9 — Export a POA&M
+
+1. In the Compliance Workspace, generate the **POA&M** document (same flow as SSP).
+2. Click **View** on the completed POA&M, then click **Export Excel**.
+3. **Expected:** An `.xlsx` file downloads with one row per failing control, including columns for control ID, weakness description, risk level, and planned remediation date.
 
 ---
 

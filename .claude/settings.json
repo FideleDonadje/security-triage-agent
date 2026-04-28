@@ -1,4 +1,14 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(node -e ' *)",
+      "Bash(curl -sL -o \"d:/Projects/security-triage-agent/lambda/compliance-worker/sp800-53b.xlsx\" \"https://csrc.nist.gov/files/pubs/sp/800/53/b/upd1/final/docs/sp800-53b-control-baselines.xlsx\")",
+      "Bash(curl -sL -o \"d:/Projects/security-triage-agent/lambda/compliance-worker/sp800-53r5-controls.xlsx\" \"https://csrc.nist.gov/files/pubs/sp/800/53/r5/upd1/final/docs/sp800-53r5-controls.xlsx\")",
+      "Bash(grep -n \"'\\\\\\\\*'\" /d/Projects/security-triage-agent/cdk/lib/*.ts)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(curl -s https://raw.githubusercontent.com/FideleDonadje/security-triage-agent/main/README.md)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -6,8 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "INPUT=$(cat); echo \"$INPUT\" | python3 -c \"\nimport sys, json\ntry:\n    data = json.load(sys.stdin)\n    cmd = data.get('command', '')\n    blocked = ['cdk destroy', 'aws s3 rm', 'aws s3api delete', 'aws dynamodb delete-table', 'aws cognito-idp delete-user-pool', 'drop table', 'DELETE FROM']\n    for b in blocked:\n        if b.lower() in cmd.lower():\n            print(f'BLOCKED: Destructive command detected: {b}', file=sys.stderr)\n            sys.exit(2)\nexcept:\n    pass\nsys.exit(0)\n\"",
-            "description": "Block destructive AWS and database commands"
+            "command": "INPUT=$(cat); echo \"$INPUT\" | python3 -c \"\nimport sys, json\ntry:\n    data = json.load(sys.stdin)\n    cmd = data.get('command', '')\n    blocked = ['cdk destroy', 'aws s3 rm', 'aws s3api delete', 'aws dynamodb delete-table', 'aws cognito-idp delete-user-pool', 'drop table', 'DELETE FROM']\n    for b in blocked:\n        if b.lower() in cmd.lower():\n            print(f'BLOCKED: Destructive command detected: {b}', file=sys.stderr)\n            sys.exit(2)\nexcept:\n    pass\nsys.exit(0)\n\""
           }
         ]
       }
@@ -18,8 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "FILE=$(cat | python3 -c \"import sys,json; d=json.load(sys.stdin); print(d.get('file_path',''))\"); if echo \"$FILE\" | grep -qE '\\.(ts|tsx)$' && [ -f \"$(dirname $FILE)/tsconfig.json\" ]; then cd \"$(dirname $FILE)\" && npx tsc --noEmit 2>&1 | head -20; fi; exit 0",
-            "description": "Run TypeScript check after editing .ts files"
+            "command": "FILE=$(cat | python3 -c \"import sys,json; d=json.load(sys.stdin); print(d.get('file_path',''))\"); if echo \"$FILE\" | grep -qE '\\.(ts|tsx)$' && [ -f \"$(dirname $FILE)/tsconfig.json\" ]; then cd \"$(dirname $FILE)\" && npx tsc --noEmit 2>&1 | head -20; fi; exit 0"
           }
         ]
       }

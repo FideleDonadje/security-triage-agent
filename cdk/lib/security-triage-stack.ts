@@ -84,6 +84,8 @@ export class SecurityTriageStack extends cdk.Stack {
   public readonly userPoolClient: cognito.UserPoolClient;
   public readonly taskTable: dynamodb.Table;
   public readonly api: apigateway.RestApi;
+  public readonly apiLambda: lambdaNode.NodejsFunction;
+  public readonly cognitoAuthorizer: apigateway.CognitoUserPoolsAuthorizer;
 
   constructor(scope: Construct, id: string, props?: SecurityTriageStackProps) {
     super(scope, id, props);
@@ -361,7 +363,7 @@ export class SecurityTriageStack extends cdk.Stack {
     }));
 
     // ── Lambda: API Layer (NodejsFunction — esbuild bundles TS) ───────────
-    const apiLambda = new lambdaNode.NodejsFunction(this, 'ApiLambda', {
+    this.apiLambda = new lambdaNode.NodejsFunction(this, 'ApiLambda', {
       functionName: 'security-triage-api',
       description: 'REST API handler: validates Cognito JWT, proxies chat to Bedrock Agent, manages task queue CRUD in DynamoDB',
       runtime: lambda.Runtime.NODEJS_22_X,
@@ -463,14 +465,14 @@ export class SecurityTriageStack extends cdk.Stack {
       },
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS, // tighten to CloudFront URL post-deploy
-        allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+        allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
         allowHeaders: ['Content-Type', 'Authorization'],
         maxAge: cdk.Duration.hours(1),
       },
     });
 
     // Cognito authorizer — every route requires a valid analyst JWT
-    const cognitoAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(
+    this.cognitoAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(
       this,
       'CognitoAuthorizer',
       {
@@ -481,11 +483,11 @@ export class SecurityTriageStack extends cdk.Stack {
     );
 
     const authOptions: apigateway.MethodOptions = {
-      authorizer: cognitoAuthorizer,
+      authorizer: this.cognitoAuthorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     };
 
-    const lambdaIntegration = new apigateway.LambdaIntegration(apiLambda, {
+    const lambdaIntegration = new apigateway.LambdaIntegration(this.apiLambda, {
       proxy: true,
     });
 

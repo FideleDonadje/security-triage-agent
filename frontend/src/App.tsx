@@ -1,18 +1,16 @@
-import { useState, useEffect, useRef } from 'react';
-import { handleCallback, getStoredToken, redirectToLogin, signOut, getEmail } from './lib/auth';
-import Chat from './components/Chat';
-import TaskQueue from './components/TaskQueue';
+import { useEffect, useRef, useState } from 'react';
+import { BrowserRouter, NavLink, Navigate, Route, Routes, useParams } from 'react-router-dom';
+import { getEmail, getStoredToken, handleCallback, redirectToLogin, signOut } from './lib/auth';
 import AtoAssist from './components/AtoAssist';
-
-type Tab = 'triage' | 'ato';
+import ComplianceWorkspace, { DocumentsView } from './components/ComplianceWorkspace';
+import SettingsView from './components/SettingsView';
+import TriageView from './components/TriageView';
 
 // ── Initials helper ───────────────────────────────────────────────────────────
 function getInitials(email: string): string {
   const local = email.split('@')[0] ?? '';
   const parts = local.split(/[._\-]/).filter(Boolean);
-  if (parts.length >= 2) {
-    return (parts[0][0] + parts[1][0]).toUpperCase();
-  }
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
   return local.slice(0, 2).toUpperCase() || '??';
 }
 
@@ -21,39 +19,25 @@ function AvatarMenu({ email }: { email: string }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
-  // Close on outside click
   useEffect(() => {
     if (!open) return;
     function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     }
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
-  const initials = getInitials(email);
-
   return (
     <div ref={ref} style={styles.avatarWrapper}>
-      <button
-        style={styles.avatar}
-        onClick={() => setOpen((v) => !v)}
-        title={email}
-        aria-label="User menu"
-      >
-        {initials}
+      <button style={styles.avatar} onClick={() => setOpen((v) => !v)} title={email} aria-label="User menu">
+        {getInitials(email)}
       </button>
-
       {open && (
         <div style={styles.dropdown}>
           <div style={styles.dropdownEmail}>{email}</div>
           <div style={styles.dropdownDivider} />
-          <button
-            style={styles.dropdownSignOut}
-            onClick={() => { setOpen(false); signOut(); }}
-          >
+          <button style={styles.dropdownSignOut} onClick={() => { setOpen(false); signOut(); }}>
             Sign out
           </button>
         </div>
@@ -62,13 +46,40 @@ function AvatarMenu({ email }: { email: string }) {
   );
 }
 
-// ── App ───────────────────────────────────────────────────────────────────────
+// ── Nav tab helper ────────────────────────────────────────────────────────────
+function NavTab({ to, children, badge }: { to: string; children: React.ReactNode; badge?: number }) {
+  return (
+    <NavLink
+      to={to}
+      style={({ isActive }) => ({
+        ...styles.tab,
+        ...(isActive ? styles.tabActive : {}),
+      })}
+    >
+      {children}
+      {badge != null && badge > 0 && <span style={styles.pendingBadge}>{badge}</span>}
+    </NavLink>
+  );
+}
 
+// ── Theme toggle ──────────────────────────────────────────────────────────────
+function useTheme(): [string, () => void] {
+  const [theme, setTheme] = useState<string>(() => localStorage.getItem('theme') ?? 'dark');
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+
+  const toggle = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
+  return [theme, toggle];
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [ready,        setReady]        = useState(false);
-  const [email,        setEmail]        = useState('');
-  const [activeTab,    setActiveTab]    = useState<Tab>('triage');
-  const [pendingCount, setPendingCount] = useState(0);
+  const [ready, setReady] = useState(false);
+  const [email, setEmail] = useState('');
+  const [theme, toggleTheme] = useTheme();
 
   useEffect(() => {
     async function init() {
@@ -88,50 +99,51 @@ export default function App() {
   }
 
   return (
-    <>
-      <header style={styles.header}>
-        <div style={styles.headerLeft}>
-          <span style={styles.headerTitle}>Security Triage Agent</span>
-          <nav style={styles.tabBar}>
+    <BrowserRouter>
+      <div style={styles.shell}>
+        <header style={styles.header}>
+          <div style={styles.headerLeft}>
+            <span style={styles.headerTitle}>Security Triage Agent</span>
+            <nav style={styles.tabBar}>
+              <NavTab to="/triage">Triage</NavTab>
+              <NavTab to="/systems/default/documents">Compliance</NavTab>
+            </nav>
+          </div>
+          <div style={styles.headerRight}>
             <button
-              style={{ ...styles.tab, ...(activeTab === 'triage' ? styles.tabActive : {}) }}
-              onClick={() => setActiveTab('triage')}
+              style={styles.themeBtn}
+              onClick={toggleTheme}
+              title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+              aria-label="Toggle theme"
             >
-              Triage
-              {pendingCount > 0 && (
-                <span style={styles.pendingBadge}>{pendingCount}</span>
-              )}
+              {theme === 'dark' ? 'Light' : 'Dark'}
             </button>
-            <button
-              style={{ ...styles.tab, ...(activeTab === 'ato' ? styles.tabActive : {}) }}
-              onClick={() => setActiveTab('ato')}
-            >
-              ATO Assist
-            </button>
-          </nav>
-        </div>
-        <div style={styles.headerRight}>
-          <AvatarMenu email={email} />
-        </div>
-      </header>
+            <AvatarMenu email={email} />
+          </div>
+        </header>
 
-      {activeTab === 'triage' ? (
-        <div style={styles.panels}>
-          <div style={styles.leftPanel}>
-            <TaskQueue onPendingCount={setPendingCount} />
-          </div>
-          <div style={styles.divider} />
-          <div style={styles.rightPanel}>
-            <Chat />
-          </div>
-        </div>
-      ) : (
-        <div style={styles.fullPanel}>
-          <AtoAssist />
-        </div>
-      )}
-    </>
+        <main style={styles.main}>
+          <Routes>
+            <Route index element={<Navigate to="/triage" replace />} />
+            <Route path="/triage" element={<TriageView />} />
+            <Route path="/systems/:systemId" element={<ComplianceWorkspace />}>
+              <Route index element={<Navigate to="documents" replace />} />
+              <Route path="documents" element={<DocumentsView />} />
+              <Route path="ato"       element={<div style={styles.fullPanel}><AtoAssist /></div>} />
+              <Route path="settings"  element={<SettingsViewWrapper />} />
+            </Route>
+
+            <Route path="*" element={<Navigate to="/triage" replace />} />
+          </Routes>
+        </main>
+      </div>
+    </BrowserRouter>
   );
+}
+
+function SettingsViewWrapper() {
+  const { systemId = 'default' } = useParams<{ systemId: string }>();
+  return <SettingsView systemId={systemId} />;
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -142,6 +154,13 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'center',
     color: 'var(--muted)',
     fontSize: 13,
+    background: 'var(--bg)',
+  },
+  shell: {
+    height: '100vh',
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
     background: 'var(--bg)',
   },
   header: {
@@ -155,20 +174,9 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '0 20px',
     flexShrink: 0,
   },
-  headerLeft: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 20,
-  },
-  headerTitle: {
-    fontWeight: 600,
-    fontSize: 15,
-    color: 'var(--text)',
-  },
-  tabBar: {
-    display: 'flex',
-    gap: 2,
-  },
+  headerLeft: { display: 'flex', alignItems: 'center', gap: 20 },
+  headerTitle: { fontWeight: 600, fontSize: 15, color: 'var(--text)' },
+  tabBar: { display: 'flex', gap: 2 },
   tab: {
     background: 'transparent',
     border: '1px solid transparent',
@@ -181,6 +189,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     gap: 6,
+    textDecoration: 'none',
   },
   tabActive: {
     background: 'var(--surface2)',
@@ -197,14 +206,20 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '1px 5px',
     lineHeight: 1.4,
   },
-  headerRight: {
-    display: 'flex',
-    alignItems: 'center',
+  headerRight: { display: 'flex', alignItems: 'center', gap: 8 },
+  themeBtn: {
+    background: 'transparent',
+    border: '1px solid var(--border)',
+    color: 'var(--muted)',
+    fontSize: 11,
+    fontWeight: 600,
+    height: 28,
+    borderRadius: 6,
+    padding: '0 10px',
+    cursor: 'pointer',
+    letterSpacing: '0.04em',
   },
-  // ── Avatar ─────────────────────────────────────────────────────────────────
-  avatarWrapper: {
-    position: 'relative',
-  },
+  avatarWrapper: { position: 'relative' },
   avatar: {
     width: 32,
     height: 32,
@@ -228,21 +243,13 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--surface)',
     border: '1px solid var(--border)',
     borderRadius: 8,
-    boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+    boxShadow: '0 4px 16px var(--shadow)',
     minWidth: 200,
     zIndex: 100,
     overflow: 'hidden',
   },
-  dropdownEmail: {
-    padding: '10px 14px',
-    fontSize: 12,
-    color: 'var(--muted)',
-    wordBreak: 'break-all',
-  },
-  dropdownDivider: {
-    height: 1,
-    background: 'var(--border)',
-  },
+  dropdownEmail: { padding: '10px 14px', fontSize: 12, color: 'var(--muted)', wordBreak: 'break-all' },
+  dropdownDivider: { height: 1, background: 'var(--border)' },
   dropdownSignOut: {
     width: '100%',
     textAlign: 'left',
@@ -253,28 +260,9 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 13,
     cursor: 'pointer',
   },
-  // ── Layout ─────────────────────────────────────────────────────────────────
-  panels: {
-    display: 'flex',
-    flex: 1,
-    overflow: 'hidden',
-  },
-  leftPanel: {
-    width: '40%',
-    minWidth: 360,
-    display: 'flex',
-    flexDirection: 'column',
-    overflow: 'hidden',
-  },
-  divider: {
-    width: 1,
-    background: 'var(--border)',
-    flexShrink: 0,
-  },
-  rightPanel: {
+  main: {
     flex: 1,
     display: 'flex',
-    flexDirection: 'column',
     overflow: 'hidden',
   },
   fullPanel: {
