@@ -75,6 +75,14 @@ In a multi-account environment, Security Hub's aggregated view means the agent w
 
 ![RMF documents ready](docs/screenshots/compliance-workspace-expanded-2.png)
 
+**SSP document viewer — system overview, authorization boundary, and 345-control status bar (67 Implemented / 237 Partial / 40 Inherited):**
+
+![SSP overview](docs/screenshots/compliance-workspace-SSP-overview.png)
+
+**SSP control narratives — per-control implementation statement, responsible entities, testing evidence, and CRM responsibility assignment:**
+
+![SSP control narratives](docs/screenshots/compliance-workspace-control-narrative.png)
+
 **ATO Report Generator — NIST SP 800-53 Rev 5: 1,831 findings, 68% pass rate, AC family with POA&M entries:**
 
 ![ATO Assist dashboard](docs/screenshots/ATO-Assist-dashbord.png)
@@ -192,9 +200,9 @@ flowchart TB
 
 ---
 
-## MVP scope
+## Triage Agent scope
 
-**In scope**
+**Implemented**
 - Single analyst workflow
 - Chat UI + Task Queue panel (two-panel layout)
 - Agent investigates Security Hub findings on demand
@@ -202,8 +210,9 @@ flowchart TB
 - Two autonomous actions: enable S3 access logging, apply required resource tags (Environment / Owner / Project)
 - Compliance posture reports against any enabled Security Hub standard (NIST 800-53, CIS, FSBP, PCI DSS)
 - Task management: analyst can approve, reject, or dismiss tasks; agent can cancel its own queued tasks
+- Account IDs masked by default in the task queue (Show IDs toggle to reveal)
 
-**Out of scope (post-MVP)**
+**Not implemented**
 - Multi-user / role-based approval
 - Email / Slack notifications
 - Auto-approval or scheduled monitoring
@@ -242,10 +251,12 @@ flowchart TB
 │   │   └── index.ts              # /ato/standards, /ato/generate, /ato/status, /ato/jobs
 │   ├── ato-worker/               # ATO Assist background processor
 │   │   └── index.ts              # Security Hub → group by NIST family → Bedrock → S3
-│   └── compliance-worker/        # Compliance Workspace document generator
+│   ├── compliance-worker/        # Compliance Workspace document generator
 │       ├── index.ts              # Stream handler → dispatches to SSP/POA&M/SAR/RA/ConMon/IRP generators
 │       ├── nist-catalog.ts       # Official NIST SP 800-53B baseline lists + SP 800-53r5 titles (207/345/428)
 │       └── aws-crm.ts            # AWS FedRAMP High CRM: PE/MA inherited, SC/CM/CP shared responsibility
+│   └── compliance-repair/        # Stuck-job detector + DLQ redrive (EventBridge, every 5 min)
+│       └── index.ts
 ├── frontend/                     # React + Vite SPA
 │   ├── src/
 │   │   ├── App.tsx               # Shell: header with avatar dropdown + tab nav
