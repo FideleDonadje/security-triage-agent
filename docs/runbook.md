@@ -154,7 +154,7 @@ aws ssm put-parameter \
 | --- | --- |
 | `SYSTEMS_TABLE_NAME` | `security-triage-systems` |
 | `STATUS_INDEX_NAME` | `status-all-index` |
-| `STUCK_THRESHOLD_MIN` | `12` |
+| `STUCK_THRESHOLD_MIN` | `16` |
 
 ---
 
@@ -286,7 +286,7 @@ EventBridge rule → every 5 minutes
   └─▶ security-triage-compliance-repair (Lambda)
           │  Query status-all-index GSI for status=IN_PROGRESS
           │  For each result: check generationStartedAt
-          │  If stuck > 12 minutes:
+          │  If stuck > 16 minutes:
           │    UpdateItem: IN_PROGRESS → FAILED (conditional — skips if already COMPLETED)
           │
           └─▶ Also triggered by SQS DLQ (compliance worker failures after retries)
