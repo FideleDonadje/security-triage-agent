@@ -1,0 +1,26 @@
+# .github/workflows/ci.yml
+# Place this file in every portfolio repo that should run the security gate.
+# This is the only file each repo needs — all scan logic lives in shared-workflows.
+#
+# Set iac_type to match the repo:
+#   terraform — for repos with .tf files
+#   cdk       — for repos with CDK stacks (requires CDK_SYNTH_ROLE_ARN secret)
+#
+# For CDK repos, add the following secret to the repo (or org-level):
+#   CDK_SYNTH_ROLE_ARN — ARN of the IAM role used for cdk synth in CI.
+#   This role must trust the GitHub OIDC provider for this specific repo.
+ 
+name: CI
+ 
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+ 
+jobs:
+  security-gate:
+    uses: FideleDonadje/shared-workflows/.github/workflows/security-scan.yml@main
+    with:
+      iac_type: "cdk" # change to "terraform" for Terraform repos
+    secrets: inherit
