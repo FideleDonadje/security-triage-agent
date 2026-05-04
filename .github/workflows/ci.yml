@@ -21,10 +21,11 @@ on:
 permissions:
   contents: read
   security-events: write
+  id-token: write
 
 jobs:
   security-gate:
     uses: FideleDonadje/shared-workflows/.github/workflows/security-scan.yml@main
     with:
-      iac_type: "cdk"
+      iac_type: "cdk" # change to "terraform" for Terraform repos
     secrets: inherit
