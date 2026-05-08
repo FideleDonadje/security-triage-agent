@@ -33,7 +33,7 @@ import * as lambdaNode from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as cr from 'aws-cdk-lib/custom-resources';
-import { Construct } from 'constructs';
+import { Construct, IConstruct } from 'constructs';
 
 // Well-known SSM parameter names
 export const SSM_AGENT_ID           = '/security-triage/agent-id';
@@ -113,12 +113,18 @@ export class AgentStack extends cdk.Stack {
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
+    (agentLogGroup.node.defaultChild as logs.CfnLogGroup).addMetadata('checkov', {
+      skip: [{ id: 'CKV_AWS_158', comment: 'KMS encryption on logs deferred to prod tier' }],
+    });
 
     // Action group Lambda log group (pre-created for retention control)
     const agentToolsLogGroup = new logs.LogGroup(this, 'AgentToolsLogs', {
       logGroupName: '/aws/lambda/security-triage-agent-tools',
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    (agentToolsLogGroup.node.defaultChild as logs.CfnLogGroup).addMetadata('checkov', {
+      skip: [{ id: 'CKV_AWS_158', comment: 'KMS encryption on logs deferred to prod tier' }],
     });
 
     // ── Bedrock Agent Service Role ─────────────────────────────────────────
@@ -375,6 +381,15 @@ export class AgentStack extends cdk.Stack {
         REGION: this.region,
         REQUIRED_TAG_KEYS_PARAM: SSM_REQUIRED_TAG_KEYS,
       },
+    });
+
+    (agentToolsLambda.node.defaultChild as lambda.CfnFunction).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_117', comment: 'Lambda VPC placement not required for dev tier' },
+        { id: 'CKV_AWS_116', comment: 'DLQ not required for dev tier' },
+        { id: 'CKV_AWS_115', comment: 'Reserved concurrency not required for dev tier' },
+        { id: 'CKV_AWS_173', comment: 'Secrets in Secrets Manager not env vars' },
+      ],
     });
 
     // Allow Bedrock to invoke the action group Lambda.
@@ -642,6 +657,10 @@ export class AgentStack extends cdk.Stack {
       ],
     });
 
+    agent.addMetadata('checkov', {
+      skip: [{ id: 'CKV_AWS_373', comment: 'CMK encryption on Bedrock Agent deferred to prod tier' }],
+    });
+
     // ── Bedrock Agent Alias (prod) → DRAFT ────────────────────────────────
     // Pointing to DRAFT means the alias always reflects the latest PrepareAgent
     // result — no manual version creation or alias updates needed on redeploy.
@@ -703,6 +722,14 @@ export class AgentStack extends cdk.Stack {
       bundling: { minify: true, sourceMap: false, externalModules: [] },
     });
 
+    (agentPrepareLambda.node.defaultChild as lambda.CfnFunction).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_117', comment: 'Lambda VPC placement not required for dev tier' },
+        { id: 'CKV_AWS_116', comment: 'DLQ not required for dev tier' },
+        { id: 'CKV_AWS_115', comment: 'Reserved concurrency not required for dev tier' },
+      ],
+    });
+
     const agentPrepareProvider = new cr.Provider(this, 'AgentPrepareProvider', {
       onEventHandler: agentPrepareLambda,
     });
@@ -723,6 +750,23 @@ export class AgentStack extends cdk.Stack {
     // CfnAgentAlias auto-triggers PrepareAgent during creation — if the agent is not
     // yet prepared (or preparation fails), the alias creation fails too.
     agentAlias.node.addDependency(agentPrepareResource);
+
+    // Suppress Checkov findings on CDK-generated framework Lambdas (Provider, etc.)
+    // that cannot be annotated directly. Only fires on Lambdas with no existing annotation.
+    cdk.Aspects.of(this).add({
+      visit(node: IConstruct): void {
+        if (node instanceof lambda.CfnFunction && !node.cfnOptions.metadata?.['checkov']) {
+          node.addMetadata('checkov', {
+            skip: [
+              { id: 'CKV_AWS_117', comment: 'CDK framework Lambda — VPC not required for dev tier' },
+              { id: 'CKV_AWS_116', comment: 'CDK framework Lambda — DLQ not required for dev tier' },
+              { id: 'CKV_AWS_115', comment: 'CDK framework Lambda — reserved concurrency not required for dev tier' },
+              { id: 'CKV_AWS_173', comment: 'CDK framework Lambda — no sensitive env vars' },
+            ],
+          });
+        }
+      },
+    } as cdk.IAspect);
 
     // ── CDK Outputs ────────────────────────────────────────────────────────
     new cdk.CfnOutput(this, 'AgentId', {

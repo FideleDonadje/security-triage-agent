@@ -1,0 +1,3 @@
+# Gitleaks fingerprint allowlist.
+# cdk/cdk.out/ is in .gitignore — git-mode scans skip it automatically.
+# No findings to suppress.
