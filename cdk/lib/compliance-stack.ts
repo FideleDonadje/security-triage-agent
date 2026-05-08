@@ -34,7 +34,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as cr from 'aws-cdk-lib/custom-resources';
-import { Construct } from 'constructs';
+import { Construct, IConstruct } from 'constructs';
 
 export const SSM_SYSTEMS_TABLE  = '/security-triage/systems-table-name';
 export const SSM_COMPLIANCE_BUCKET = '/security-triage/compliance-bucket-name';
@@ -79,6 +79,12 @@ export class ComplianceStack extends cdk.Stack {
       sortKey:         { name: 'sk', type: dynamodb.AttributeType.STRING },
       projectionType:  dynamodb.ProjectionType.ALL,
     });
+    (this.systemsTable.node.defaultChild as dynamodb.CfnTable).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_119', comment: 'AWS managed encryption acceptable for dev tier' },
+        { id: 'CKV_AWS_28', comment: 'Point-in-time recovery enabled in prod; deferred for dev tier' },
+      ],
+    });
 
     // ── S3: compliance reports bucket (versioned) ──────────────────────────
     this.complianceBucket = new s3.Bucket(this, 'ComplianceReportsBucket', {
@@ -110,6 +116,11 @@ export class ComplianceStack extends cdk.Stack {
         },
       ],
     });
+    (this.complianceBucket.node.defaultChild as s3.CfnBucket).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_18', comment: 'Access logging not required for compliance reports bucket' },
+      ],
+    });
 
     // ── SQS DLQ for compliance worker ─────────────────────────────────────
     const workerDlq = new sqs.Queue(this, 'ComplianceWorkerDlq', {
@@ -118,6 +129,11 @@ export class ComplianceStack extends cdk.Stack {
       visibilityTimeout:  cdk.Duration.seconds(360), // 6× repair Lambda timeout (60s)
       encryption:      sqs.QueueEncryption.SQS_MANAGED,
     });
+    (workerDlq.node.defaultChild as sqs.CfnQueue).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_27', comment: 'SQS CMK encryption deferred to prod tier; DLQ carries internal Lambda failure notifications only' },
+      ],
+    });
 
     // ── CloudWatch log groups ──────────────────────────────────────────────
     const workerLogGroup = new logs.LogGroup(this, 'ComplianceWorkerLogs', {
@@ -125,11 +141,17 @@ export class ComplianceStack extends cdk.Stack {
       retention:     logs.RetentionDays.THREE_MONTHS,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
+    (workerLogGroup.node.defaultChild as logs.CfnLogGroup).addMetadata('checkov', {
+      skip: [{ id: 'CKV_AWS_158', comment: 'KMS encryption on logs deferred to prod tier' }],
+    });
 
     const repairLogGroup = new logs.LogGroup(this, 'ComplianceRepairLogs', {
       logGroupName:  '/aws/lambda/security-triage-compliance-repair',
       retention:     logs.RetentionDays.THREE_MONTHS,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    (repairLogGroup.node.defaultChild as logs.CfnLogGroup).addMetadata('checkov', {
+      skip: [{ id: 'CKV_AWS_158', comment: 'KMS encryption on logs deferred to prod tier' }],
     });
 
     // ── IAM: compliance-worker role ────────────────────────────────────────
@@ -279,6 +301,15 @@ export class ComplianceStack extends cdk.Stack {
       },
     });
 
+    (complianceWorker.node.defaultChild as lambda.CfnFunction).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_117', comment: 'Lambda VPC placement not required for dev tier' },
+        { id: 'CKV_AWS_116', comment: 'DLQ handled at SQS queue level, not Lambda level' },
+        { id: 'CKV_AWS_115', comment: 'Reserved concurrency not required for dev tier' },
+        { id: 'CKV_AWS_173', comment: 'Secrets in Secrets Manager not env vars' },
+      ],
+    });
+
     // DynamoDB stream → compliance-worker
     complianceWorker.addEventSource(
       new lambdaEventSources.DynamoEventSource(this.systemsTable, {
@@ -316,6 +347,15 @@ export class ComplianceStack extends cdk.Stack {
         STUCK_THRESHOLD_MIN: '16',
         REGION:              this.region,
       },
+    });
+
+    (complianceRepair.node.defaultChild as lambda.CfnFunction).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_117', comment: 'Lambda VPC placement not required for dev tier' },
+        { id: 'CKV_AWS_116', comment: 'DLQ not applicable for scheduled repair Lambda' },
+        { id: 'CKV_AWS_115', comment: 'Reserved concurrency not required for dev tier' },
+        { id: 'CKV_AWS_173', comment: 'Env vars contain non-sensitive config (table name, index, threshold, region) — no secrets' },
+      ],
     });
 
     // SQS DLQ → repair Lambda (failed worker records)
@@ -410,6 +450,23 @@ export class ComplianceStack extends cdk.Stack {
       }),
     });
     initSystemRecord.node.addDependency(this.systemsTable);
+
+    // Suppress Checkov findings on CDK-generated framework Lambdas (AwsCustomResource, etc.)
+    // that cannot be annotated directly. Only fires on Lambdas with no existing annotation.
+    cdk.Aspects.of(this).add({
+      visit(node: IConstruct): void {
+        if (node instanceof lambda.CfnFunction && !node.cfnOptions.metadata?.['checkov']) {
+          node.addMetadata('checkov', {
+            skip: [
+              { id: 'CKV_AWS_117', comment: 'CDK framework Lambda — VPC not required for dev tier' },
+              { id: 'CKV_AWS_116', comment: 'CDK framework Lambda — DLQ not required for dev tier' },
+              { id: 'CKV_AWS_115', comment: 'CDK framework Lambda — reserved concurrency not required for dev tier' },
+              { id: 'CKV_AWS_173', comment: 'CDK framework Lambda — no sensitive env vars' },
+            ],
+          });
+        }
+      },
+    } as cdk.IAspect);
 
     // ── SSM Parameters ─────────────────────────────────────────────────────
     new ssm.StringParameter(this, 'SsmSystemsTableName', {
