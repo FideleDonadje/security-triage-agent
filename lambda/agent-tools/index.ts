@@ -116,74 +116,77 @@ interface BedrockAgentResponse {
   };
 }
 
-// ── Handler ───────────────────────────────────────────────────────────────────
+// ── Tool dispatch ─────────────────────────────────────────────────────────────
+// All tool params are string-valued: the Bedrock action-group event delivers them
+// that way, and the Strands proxy (see below) stringifies before calling.
 
-export const handler = async (event: BedrockAgentEvent): Promise<BedrockAgentResponse> => {
-  const params = parseParams(event.parameters ?? []);
-
-  let resultText: string;
+async function runTool(fn: string, params: Record<string, string>): Promise<string> {
   try {
-    switch (event.function) {
-      case 'get_findings':
-        resultText = await getFindings(params);
-        break;
-      case 'get_threat_context':
-        resultText = await getThreatContext(params);
-        break;
-      case 'get_config_status':
-        resultText = await getConfigStatus(params);
-        break;
-      case 'get_trail_events':
-        resultText = await getTrailEvents(params);
-        break;
-      case 'queue_task':
-        resultText = await queueTask(params);
-        break;
-      case 'cancel_task':
-        resultText = await cancelTask(params);
-        break;
-      case 'get_tag_compliance':
-        resultText = await getTagCompliance(params);
-        break;
-      case 'get_enabled_standards':
-        resultText = await getEnabledStandards();
-        break;
-      case 'get_compliance_report':
-        resultText = await getComplianceReport(params);
-        break;
-      case 'get_task_queue':
-        resultText = await getTaskQueue(params);
-        break;
-      case 'get_cost_analysis':
-        resultText = await getCostAnalysis(params);
-        break;
-      case 'get_iam_analysis':
-        resultText = await getIamAnalysis(params);
-        break;
-      case 'get_access_analyzer':
-        resultText = await getAccessAnalyzer(params);
-        break;
-      default:
-        resultText = `Unknown function: ${event.function}`;
+    switch (fn) {
+      case 'get_findings':          return await getFindings(params);
+      case 'get_threat_context':    return await getThreatContext(params);
+      case 'get_config_status':     return await getConfigStatus(params);
+      case 'get_trail_events':      return await getTrailEvents(params);
+      case 'queue_task':            return await queueTask(params);
+      case 'cancel_task':           return await cancelTask(params);
+      case 'get_tag_compliance':    return await getTagCompliance(params);
+      case 'get_enabled_standards': return await getEnabledStandards();
+      case 'get_compliance_report': return await getComplianceReport(params);
+      case 'get_task_queue':        return await getTaskQueue(params);
+      case 'get_cost_analysis':     return await getCostAnalysis(params);
+      case 'get_iam_analysis':      return await getIamAnalysis(params);
+      case 'get_access_analyzer':   return await getAccessAnalyzer(params);
+      default:                      return `Unknown function: ${fn}`;
     }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error(`Tool ${event.function} failed:`, e);
-    resultText = `Error executing ${event.function}: ${msg}`;
+    console.error(`Tool ${fn} failed:`, e);
+    return `Error executing ${fn}: ${msg}`;
+  }
+}
+
+// ── Handler ───────────────────────────────────────────────────────────────────
+// Two callers:
+//   1. Bedrock Agents Classic action group → { function, actionGroup, parameters:[] }
+//   2. Strands agent proxy (lambda/agent) → { tool, input:{} } → { body }
+// Path 2 is the migration target (see docs/agent-migration-plan.md). Path 1 stays
+// until the Classic agent is torn down.
+
+interface DirectToolEvent {
+  tool: string;
+  input?: Record<string, unknown>;
+}
+
+type ToolEvent = BedrockAgentEvent | DirectToolEvent;
+
+function isBedrockEvent(e: ToolEvent): e is BedrockAgentEvent {
+  return typeof (e as BedrockAgentEvent).function === 'string';
+}
+
+export const handler = async (
+  event: ToolEvent,
+): Promise<BedrockAgentResponse | { body: string }> => {
+  if (isBedrockEvent(event)) {
+    const params = parseParams(event.parameters ?? []);
+    const body = await runTool(event.function, params);
+    return {
+      messageVersion: '1.0',
+      response: {
+        actionGroup: event.actionGroup,
+        function: event.function,
+        functionResponse: { responseBody: { TEXT: { body } } },
+      },
+    };
   }
 
-  return {
-    messageVersion: '1.0',
-    response: {
-      actionGroup: event.actionGroup,
-      function: event.function,
-      functionResponse: {
-        responseBody: {
-          TEXT: { body: resultText },
-        },
-      },
-    },
-  };
+  // Direct (Strands) path — coerce every input value to a string
+  const params = Object.fromEntries(
+    Object.entries(event.input ?? {}).map(([k, v]) => [
+      k,
+      typeof v === 'string' ? v : JSON.stringify(v),
+    ]),
+  );
+  return { body: await runTool(event.tool, params) };
 };
 
 // ── Tool: get_findings ────────────────────────────────────────────────────────

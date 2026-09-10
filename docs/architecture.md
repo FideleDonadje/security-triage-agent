@@ -307,3 +307,70 @@ The table below maps each logical component to the reference implementation (AWS
 | LLM / AI Engine | Generate narratives + run agent loop | Bedrock (Claude) | Azure OpenAI | Vertex AI | Ollama, vLLM |
 | Object Store | Store reports and documents | S3 | Blob Storage | GCS | MinIO |
 | Infrastructure as Code | Provision and deploy everything | CDK (TypeScript) | Bicep | Deployment Manager | Terraform, Pulumi |
+
+---
+
+## Agent Tier — Implementation
+
+Only the **Triage Agent** capability runs an agent loop (assemble prompt → call model → run tool
+→ repeat). ATO Assist and the Compliance Workspace are single-shot `InvokeModel` calls, not
+agents, and are unaffected by anything in this section.
+
+### Two layers
+
+```
+┌─ FRAMEWORK ─ the loop code ────────────────────────────┐
+│  Strands Agents SDK (TypeScript)                       │
+│  • tools = strands.tool() + Zod schema                 │
+│  • calls the model, runs assemble → call → tool loop   │
+│  • session state, streaming, multi-agent               │
+└───────────────────────────┬───────────────────────────┘
+                            │ runs on
+                            ▼
+┌─ HOSTING ─ where that code executes ───────────────────┐
+│  AgentCore Runtime — serverless microVM, $0 idle,      │
+│  8h sessions, per-session isolation, streaming         │
+└───────────────────────────────────────────────────────┘
+```
+
+### Current implementation — classic Bedrock Agents (being migrated)
+
+`InvokeAgent` is called once per analyst message; the **Bedrock managed service** runs the loop
+(`cdk/lib/agent-stack.ts` + `lambda/agent-tools/` + the async proxy in `lambda/api/chat.ts`).
+
+Constraints that motivate the migration:
+
+- 10 functions per action group (13 tools → split across two groups today)
+- No token streaming to the browser — the worker buffers the full completion, then the client polls
+- Session memory only (30-min TTL); no persistent cross-session analyst memory
+- Every instruction / schema change needs `PrepareAgent` + a manual `configVersion` bump
+- **Classic entered maintenance mode 2026-07-30** — closed to new customers, model catalog frozen
+  at that date, no new features. No end-of-life date announced; existing agents (this account is
+  grandfathered) keep running. Pinned to a pre-freeze model, so nothing is broken today.
+
+### Target — Strands on AgentCore Runtime
+
+The agent loop is the **only** thing that changes. The intent/execution boundary (§2), the
+task-queue state machine, the Execution Lambda, the API layer's routes/auth, and both
+`InvokeModel` workers are framework-independent and are not touched.
+
+The full phased plan — change list, IAM diff, effort, and rollback — lives in
+[`agent-migration-plan.md`](agent-migration-plan.md).
+
+### AWS pricing reference (verified 2026-09-09)
+
+| Item | Rate |
+| --- | --- |
+| AgentCore Runtime — CPU | $0.0895 / vCPU-hour (active compute only; $0 while idle / in I/O wait) |
+| AgentCore Runtime — memory | $0.00945 / GB-hour |
+| AgentCore Memory — short-term | $0.25 / 1,000 events |
+| AgentCore Memory — long-term storage (built-in) | $0.75 / 1,000 records / month |
+| AgentCore Memory — long-term retrieval | $0.50 / 1,000 retrievals |
+| AgentCore Gateway — API invocations | $0.005 / 1,000 |
+| AgentCore Gateway — search API | $0.025 / 1,000 |
+| AgentCore Gateway — tool indexing | $0.02 / 100 tools / month |
+| AgentCore Identity | $0.01 / 1,000 token requests — free via Runtime or Gateway |
+
+At single-analyst MVP volume the AgentCore surcharge is a few dollars a month; model-inference
+spend dominates and is identical to the Classic setup. `cdk destroy` on the agent stack reverts
+at any point.

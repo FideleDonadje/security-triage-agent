@@ -1,0 +1,22 @@
+{
+  "name": "security-triage-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "typescript": "~5.7.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-lambda": "^3.0.0",
+    "@strands-agents/sdk": "^1.17.0",
+    "express": "^5.1.0",
+    "zod": "^4.1.12"
+  }
+}
