@@ -80,11 +80,12 @@ All log groups retain logs for 90 days.
 
 | Role name | Used by | Key permissions |
 | --- | --- | --- |
-| `security-triage-api-lambda` | API Lambda | DynamoDB CRUD, S3 GetObject (compliance bucket), Bedrock InvokeAgent |
+| `security-triage-api-lambda` | API Lambda | DynamoDB CRUD, S3 GetObject (compliance bucket), `bedrock-agentcore:InvokeAgentRuntime` |
 | `security-triage-execution-lambda` | Execution Lambda | DynamoDB stream + UpdateItem, S3 PutBucketLogging, ResourceTagging |
 | `security-triage-compliance-worker-lambda` | Compliance Worker | DynamoDB UpdateItem + GetItem, S3 PutObject, Bedrock InvokeModel, SecurityHub/Config/GuardDuty read |
 | `security-triage-compliance-repair-lambda` | Repair Lambda | DynamoDB Query + UpdateItem + GetItem |
-| `security-triage-agentcore` | Bedrock Agent | SecurityHub/GuardDuty/Config/CloudTrail/IAM read, DynamoDB PutItem + Query. **DENY UpdateItem + DeleteItem.** |
+| `security-triage-agent-runtime` | AgentCore Runtime | `bedrock:InvokeModel` (Sonnet profile), ECR pull (agent image), `lambda:InvokeFunction` on agent-tools, CW logs. Nothing else. |
+| `security-triage-agent-tools-lambda` | agent-tools Lambda | SecurityHub/GuardDuty/Config/CloudTrail/IAM read, DynamoDB PutItem + UpdateItem + Query. **DENY DeleteItem.** |
 
 ### Other Resources
 
@@ -110,8 +111,7 @@ All log groups retain logs for 90 days.
 | `/security-triage/user-pool-id` | Cognito User Pool ID |
 | `/security-triage/user-pool-client-id` | Cognito App Client ID |
 | `/security-triage/cognito-domain` | Cognito hosted UI domain |
-| `/security-triage/agent-id` | Bedrock Agent ID |
-| `/security-triage/agent-alias-id` | Bedrock Agent Alias ID |
+| `/security-triage/agent-runtime-arn` | AgentCore Runtime ARN (Strands agent) |
 | `/security-triage/required-tag-keys` | JSON array of required tag keys (default: `["Environment","Owner","Project"]`) |
 | `/security-triage/systems-table-name` | DynamoDB systems table name |
 | `/security-triage/compliance-bucket-name` | Compliance S3 bucket name |
@@ -193,7 +193,7 @@ CDK deploys these stacks in dependency order:
 
 1. `SecurityTriageStack` — Cognito, DynamoDB tasks table, API Lambda, Execution Lambda, API Gateway, WAF
 2. `ComplianceStack` — DynamoDB systems table, compliance S3 bucket, compliance worker + repair Lambdas, EventBridge rule
-3. `AgentStack` — Bedrock Agent IAM role, audit log group
+3. `AgentStack` — AgentCore Runtime (Strands agent container) + endpoint, execution role, agent-tools Lambda, audit log group. **Builds a linux/arm64 container asset — Docker must be running on the deploy host.**
 4. `FrontendStack` — S3 frontend bucket, CloudFront distribution
 
 ### CloudFront Cache Invalidation
@@ -231,11 +231,11 @@ Browser
           │  invokes itself asynchronously (to bypass 29s API GW timeout)
           │
           └─▶ security-triage-api (async invocation)
-                  │  invokes Bedrock Agent (InvokeAgent API)
-                  │  Agent loop calls tools via action group Lambda
+                  │  invokes the AgentCore Runtime (bedrock-agentcore:InvokeAgentRuntime)
+                  │  Strands agent loop calls tools → agent-tools Lambda ({ tool, input })
                   │  Tool results read from SecurityHub / GuardDuty / Config / CloudTrail
                   │  Agent calls queue_task → PutItem to security-triage-tasks (DynamoDB)
-                  │  Agent response written back to DynamoDB
+                  │  Agent reply written back to DynamoDB
                   │
 Browser polls GET /chat/result/:id → API Lambda reads from DynamoDB → returns response
 ```
@@ -297,40 +297,34 @@ EventBridge rule → every 5 minutes
 
 ## 5. How to Add a New Agent Tool
 
-Tools are functions the Bedrock Agent can call during the triage loop.
+Tools are `strands.tool()` definitions in the agent container that proxy to the `agent-tools` Lambda.
 
 **Step 1 — Implement the tool function**
 
-Add it to `lambda/agent-tools/index.ts`:
+Add a `case` to the `runTool` switch in `lambda/agent-tools/index.ts` and a function beside the others:
 
 ```typescript
-async function get_my_new_tool(params: { resource_id: string }): Promise<object> {
-  // call AWS APIs (read-only)
-  return { result: '...' };
+async function getMyNewTool(params: Record<string, string>): Promise<string> {
+  // call AWS APIs (read-only); return a plain-English string
+  return '...';
 }
+// in runTool(): case 'get_my_new_tool': return await getMyNewTool(params);
 ```
 
-**Step 2 — Register it in the action group handler**
+**Step 2 — Register the Strands tool**
 
-In the same file, add a case to the dispatch switch:
-
-```typescript
-case 'get_my_new_tool':
-  result = await get_my_new_tool(params as { resource_id: string });
-  break;
-```
+In `lambda/agent/src/tools.ts`, add a `proxyTool('get_my_new_tool', '<description>', z.object({ ... }))`
+entry. No schema goes anywhere else — the Zod schema is the contract.
 
 **Step 3 — Add IAM permissions**
 
-In `cdk/lib/agent-stack.ts`, add the required read-only AWS actions to the agent tools Lambda role. The agent IAM role must never get write permissions to AWS resources.
+In `cdk/lib/agent-stack.ts`, add the required read-only AWS actions to `agentToolsLambdaRole`.
+Neither that role nor the Runtime execution role may ever get write permissions to AWS resources.
 
-**Step 4 — Register in Bedrock Agent**
+**Step 4 — Deploy**
 
-In the Bedrock console (or via CDK if you've automated agent schema updates):
-
-- Open the agent → Action Groups → your action group
-- Add the new function with its input/output schema
-- Re-prepare the agent (triggers the `agent-prepare` custom resource Lambda)
+`./deploy.sh` rebuilds the agent container (new tool baked in) and the `agent-tools` Lambda.
+No console step, no agent re-prepare — it's all code.
 
 **Step 5 — Update CLAUDE.md**
 
@@ -426,7 +420,7 @@ Add the action to the Action Tiers table.
 | What you're looking for | Where |
 | --- | --- |
 | API errors (auth failures, 500s) | CloudWatch: `/aws/lambda/security-triage-api` |
-| Agent tool call trace | CloudWatch: Bedrock Agent invocation logs (enable in Bedrock console) |
+| Agent loop / tool calls | CloudWatch: `/security-triage/agent-runtime` (AgentCore Runtime) + `/aws/lambda/security-triage-agent-tools` |
 | Compliance worker Bedrock calls | CloudWatch: `/aws/lambda/security-triage-compliance-worker` |
 | Stuck job detection runs | CloudWatch: `/aws/lambda/security-triage-compliance-repair` |
 | Remediation execution results | CloudWatch: `/aws/lambda/security-triage-execution` |
@@ -451,7 +445,7 @@ Add the action to the Action Tiers table.
 | What you're looking for | Where |
 | --- | --- |
 | API URL | SSM `/security-triage/api-url` |
-| Bedrock Agent ID | SSM `/security-triage/agent-id` |
+| AgentCore Runtime ARN | SSM `/security-triage/agent-runtime-arn` |
 | Required tag keys | SSM `/security-triage/required-tag-keys` |
 | All SSM parameters | `aws ssm get-parameters-by-path --path /security-triage/ --profile YOUR_PROFILE` |
 
@@ -560,13 +554,14 @@ aws dynamodb update-item \
 
 **Diagnosis:**
 1. API Gateway has a hard 29s timeout — the async self-invocation pattern handles this, but if the async Lambda fails to start the response will be missing.
-2. Check `/aws/lambda/security-triage-api` logs for the request.
-3. Check if Bedrock Agent is in a PREPARED state: `aws bedrock-agent get-agent --agent-id AGENT_ID --profile YOUR_PROFILE`
+2. Check `/aws/lambda/security-triage-api` logs for the request, then `/security-triage/agent-runtime` for the agent run.
+3. Check the AgentCore Runtime status: `aws bedrock-agentcore-control get-agent-runtime --agent-runtime-id $(aws ssm get-parameter --name /security-triage/agent-runtime-arn --query Parameter.Value --output text | cut -d/ -f2) --profile YOUR_PROFILE`
 
 **Common causes:**
-- Bedrock Agent not prepared after a CDK deploy (the `agent-prepare` custom resource Lambda should handle this automatically)
+- AgentCore Runtime in `CREATE_FAILED` / `UPDATE_FAILED` (bad container image, or execution role missing ECR-pull perms)
+- SSM `/security-triage/agent-runtime-arn` missing → API Lambda returns 503 "Agent not yet configured" (AgentStack not deployed yet)
 - Lambda concurrency exhausted (see Section 11)
-- VPC misconfiguration if Lambda is inside a VPC
+- Bedrock model access not enabled for the Sonnet inference profile
 
 ---
 
@@ -688,6 +683,6 @@ If you see `Bedrock JSON parse failed` in compliance worker logs, reduce `MAX_CO
 
 ### API Gateway 29s Timeout
 
-API Gateway enforces a hard 29-second timeout on all integrations. This cannot be raised. The async chat pattern (POST returns 202 + request ID, client polls GET) exists specifically because Bedrock Agent invocations take longer than 29 seconds.
+API Gateway enforces a hard 29-second timeout on all integrations. This cannot be raised. The async chat pattern (POST returns 202 + request ID, client polls GET) exists specifically because a full agent turn (model + multiple tool calls) takes longer than 29 seconds.
 
 Do not try to make the chat synchronous — it will always timeout for non-trivial agent loops.

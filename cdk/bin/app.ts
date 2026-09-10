@@ -8,7 +8,9 @@
  *      by deploy.sh after pass 1) to configure Cognito callback URLs and CORS.
  *      Using context rather than a cross-stack Fn::ImportValue keeps the stacks
  *      decoupled — FrontendStack can be updated independently.
- *   3. AgentStack — depends on SecurityTriageStack for the DynamoDB table ARN/name
+ *   3. AgentStack — Strands agent on AgentCore Runtime; depends on SecurityTriageStack
+ *      for the DynamoDB table ARN/name. Builds a container asset (needs Docker).
+ *   4. ComplianceStack — extends the API from SecurityTriageStack
  *
  * Deployment:
  *   Run ./deploy.sh for a full end-to-end deploy (infra + frontend).
@@ -22,7 +24,6 @@ import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
 import { SecurityTriageStack } from '../lib/security-triage-stack';
 import { AgentStack } from '../lib/agent-stack';
-import { AgentRuntimeStack } from '../lib/agent-runtime-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 import { ComplianceStack } from '../lib/compliance-stack';
 
@@ -56,27 +57,17 @@ const mainStack = new SecurityTriageStack(app, 'SecurityTriageStack', {
   cognitoDomainPrefix: app.node.tryGetContext('cognitoDomainPrefix') as string | undefined,
 });
 
-// 3. Agent — Bedrock Agent writes its IDs to SSM; API Lambda reads them at cold start
+// 3. Agent — Strands agent on AgentCore Runtime + the agent-tools Lambda.
+//    Writes the Runtime ARN to SSM; the API Lambda reads it at cold start.
+//    Builds the Strands container (lambda/agent) — needs Docker at deploy time.
 const agentStack = new AgentStack(app, 'SecurityTriageAgentStack', {
   env,
-  description: 'Security Triage Agent — Bedrock Agent, action group Lambda, IAM',
+  description: 'Security Triage Agent — Strands agent on AgentCore Runtime, agent-tools Lambda, IAM',
   taskTableArn: mainStack.taskTable.tableArn,
   taskTableName: mainStack.taskTable.tableName,
   statusIndexName: 'status-index',
 });
 agentStack.addDependency(mainStack);
-
-// 3b. Agent on AgentCore Runtime — migration target (docs/agent-migration-plan.md).
-//     Opt-in during the migration: `cdk deploy SecurityTriageAgentRuntimeStack -c deployAgentRuntime=true`.
-//     Needs Docker at synth/deploy time (builds the Strands container asset).
-if (app.node.tryGetContext('deployAgentRuntime') === 'true') {
-  const agentRuntimeStack = new AgentRuntimeStack(app, 'SecurityTriageAgentRuntimeStack', {
-    env,
-    description: 'Security Triage Agent — Strands agent on AgentCore Runtime (migration)',
-    agentToolsFunctionArn: `arn:aws:lambda:${env.region}:${process.env.CDK_DEFAULT_ACCOUNT}:function:security-triage-agent-tools`,
-  });
-  agentRuntimeStack.addDependency(agentStack);
-}
 
 // 4. Compliance workspace — depends on SecurityTriageStack for apiLambda, api, cognitoAuthorizer
 const complianceStack = new ComplianceStack(app, 'SecurityTriageComplianceStack', {

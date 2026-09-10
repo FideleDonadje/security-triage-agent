@@ -75,7 +75,7 @@ echo "==> CDK template verified (TypeScript build passed above)."
 
 echo ""
 echo "==> Building Lambda packages..."
-for pkg in api execution agent-tools agent-prepare ato-trigger ato-worker compliance-worker compliance-repair; do
+for pkg in api execution agent-tools ato-trigger ato-worker compliance-worker compliance-repair; do
   echo "    lambda/$pkg"
   (cd "lambda/$pkg" && npm install --silent && npm run build --silent)
 done

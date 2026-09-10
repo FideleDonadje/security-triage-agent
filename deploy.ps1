@@ -52,7 +52,7 @@ npm run build --silent; if ($LASTEXITCODE -ne 0) { Pop-Location; exit 1 }
 Pop-Location
 
 Write-Host "==> Building Lambda packages..."
-foreach ($pkg in @('api', 'execution', 'agent-tools', 'agent-prepare', 'ato-trigger', 'ato-worker')) {
+foreach ($pkg in @('api', 'execution', 'agent-tools', 'ato-trigger', 'ato-worker')) {
   Write-Host "    lambda/$pkg"
   Push-Location "lambda/$pkg"
   npm install --silent; if ($LASTEXITCODE -ne 0) { Pop-Location; exit 1 }

@@ -52,7 +52,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
-import { SSM_AGENT_ID, SSM_AGENT_ALIAS, SSM_REQUIRED_TAG_KEYS } from './agent-stack';
+import { SSM_AGENT_RUNTIME_ARN, SSM_REQUIRED_TAG_KEYS } from './agent-stack';
 import { Construct } from 'constructs';
 
 // SSM parameter paths — referenced by CI/CD pipelines and sibling stacks
@@ -360,28 +360,24 @@ export class SecurityTriageStack extends cdk.Stack {
       ],
     }));
 
-    // Bedrock: invoke AgentCore agent — ARN pattern updated post-deploy
+    // AgentCore Runtime: invoke the Strands agent (any runtime in this account)
     apiLambdaRole.addToPolicy(new iam.PolicyStatement({
       sid: 'BedrockAgentCoreInvoke',
       effect: iam.Effect.ALLOW,
-      actions: [
-        'bedrock:InvokeAgent',
-        'bedrock:InvokeAgentWithResponseStream',
-      ],
+      actions: ['bedrock-agentcore:InvokeAgentRuntime'],
       resources: [
-        `arn:aws:bedrock:${this.region}:${this.account}:agent/*`,
-        `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/*/*`,
+        `arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`,
+        `arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*/runtime-endpoint/*`,
       ],
     }));
 
-    // SSM: read agent ID and alias ID written by AgentStack after deploy
+    // SSM: read the AgentCore Runtime ARN written by AgentStack after deploy
     apiLambdaRole.addToPolicy(new iam.PolicyStatement({
       sid: 'SsmReadAgentConfig',
       effect: iam.Effect.ALLOW,
       actions: ['ssm:GetParameter'],
       resources: [
-        `arn:aws:ssm:${this.region}:${this.account}:parameter${SSM_AGENT_ID}`,
-        `arn:aws:ssm:${this.region}:${this.account}:parameter${SSM_AGENT_ALIAS}`,
+        `arn:aws:ssm:${this.region}:${this.account}:parameter${SSM_AGENT_RUNTIME_ARN}`,
       ],
     }));
 
@@ -410,9 +406,8 @@ export class SecurityTriageStack extends cdk.Stack {
         USER_POOL_ID: this.userPool.userPoolId,
         USER_POOL_CLIENT_ID: this.userPoolClient.userPoolClientId,
         REGION: this.region,
-        // Agent IDs are written to SSM by AgentStack and read at Lambda cold start
-        AGENT_ID_PARAM: SSM_AGENT_ID,
-        AGENT_ALIAS_ID_PARAM: SSM_AGENT_ALIAS,
+        // AgentCore Runtime ARN is written to SSM by AgentStack, read at cold start
+        AGENT_RUNTIME_ARN_PARAM: SSM_AGENT_RUNTIME_ARN,
         // CORS: restrict to CloudFront URL; falls back to * for local dev
         ALLOWED_ORIGIN: frontendUrl ?? '*',
         // Used by handleChat to invoke itself asynchronously

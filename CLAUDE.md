@@ -65,15 +65,22 @@ Design specs and operational docs in `docs/`:
 - Node.js Lambda (Express-style) — thin API layer only, no agent logic
 - Validates Cognito JWT on every request
 - Chat uses async pattern: POST /chat → 202 + request_id → GET /chat/result/:id (polls until done)
-- Lambda invokes itself asynchronously to work around API Gateway's 29s timeout
+- Lambda invokes itself asynchronously (worker calls AgentCore `InvokeAgentRuntime`) to work
+  around API Gateway's 29s timeout
 - Handles task queue CRUD against DynamoDB (approve, reject, dismiss via DELETE)
 - Task write actions are separate from Execution Lambda trigger (stream-based)
 
 ### Agent
-- AWS Bedrock AgentCore — owns the agent loop, memory, tool execution
-- Claude Sonnet on Bedrock (cross-region inference profile)
-- Read-only AWS access (Security Hub, GuardDuty, Config, CloudTrail, IAM, Cost Explorer, Access Analyzer)
-- Write access to DynamoDB only (queue_task and cancel_task tools)
+- Strands Agents SDK (TypeScript) app in `lambda/agent/`, hosted on Amazon Bedrock AgentCore Runtime
+  (migrated 2026-09 from classic Bedrock Agents — see `docs/agent-migration-plan.md`)
+- Container: `lambda/agent/Dockerfile` (node:22-slim, linux/arm64), exposes `/ping` + `/invocations`
+- Claude Sonnet on Bedrock (cross-region inference profile) via `strands.BedrockModel`
+- System prompt + 13 tool definitions live in `lambda/agent/src/` (prompt.ts, tools.ts)
+- Tools are thin proxies: each forwards `{ tool, input }` to the `agent-tools` Lambda (its own
+  restricted role — read-only AWS + DynamoDB PutItem/UpdateItem). The Runtime execution role can
+  only InvokeModel, pull its image, and invoke that one Lambda.
+- Runtime ARN published to SSM `/security-triage/agent-runtime-arn`; API Lambda calls it with
+  `bedrock-agentcore:InvokeAgentRuntime`
 - NEVER executes AWS actions directly
 
 ### Execution Lambda
@@ -238,8 +245,7 @@ All outputs written by CDK at deploy time. No manual env vars or cdk-outputs.jso
 /security-triage/user-pool-client-id
 /security-triage/api-url
 /security-triage/cognito-domain
-/security-triage/agent-id
-/security-triage/agent-alias-id
+/security-triage/agent-runtime-arn
 /security-triage/required-tag-keys
 ```
 
@@ -261,7 +267,7 @@ All outputs written by CDK at deploy time. No manual env vars or cdk-outputs.jso
 │   ├── bin/app.ts
 │   ├── lib/
 │   │   ├── security-triage-stack.ts   ← Cognito, DynamoDB, API Lambda, Execution Lambda, API GW, WAF
-│   │   ├── agent-stack.ts             ← Bedrock Agent, Agent Tools Lambda
+│   │   ├── agent-stack.ts             ← AgentCore Runtime (Strands agent container) + agent-tools Lambda
 │   │   ├── compliance-stack.ts        ← systems table, compliance worker + repair Lambdas, S3, SQS DLQ, EventBridge
 │   │   └── frontend-stack.ts          ← S3 + CloudFront
 │   └── package.json
@@ -276,9 +282,10 @@ All outputs written by CDK at deploy time. No manual env vars or cdk-outputs.jso
 │   │   ├── index.ts
 │   │   ├── enable-logging.ts
 │   │   └── apply-tags.ts
-│   ├── agent-tools/            ← Bedrock action group (all agent tools)
-│   │   └── index.ts
-│   ├── agent-prepare/          ← Custom Resource Lambda (PrepareAgent on deploy)
+│   ├── agent/                  ← Strands agent (runs on AgentCore Runtime)
+│   │   ├── Dockerfile          ← node:22-slim, linux/arm64, /ping + /invocations
+│   │   └── src/                ← index.ts (Express), agent.ts, prompt.ts, tools.ts (13 proxy tools)
+│   ├── agent-tools/            ← agent tool executor (Strands { tool, input } + legacy Bedrock shape)
 │   │   └── index.ts
 │   ├── ato-trigger/            ← ATO API handler (create job, poll status)
 │   │   └── index.ts
@@ -341,6 +348,9 @@ cd lambda/execution && npm run build
 cd lambda/agent-tools && npm run build
 cd lambda/ato-trigger && npm run build
 cd lambda/ato-worker && npm run build
+
+# Agent container (built by CDK DockerImageAsset on deploy — needs Docker running)
+cd lambda/agent && npm run build   # local typecheck only
 
 # Frontend (local dev)
 cd frontend && npm run dev

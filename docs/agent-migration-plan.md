@@ -117,43 +117,60 @@ Prove the IaC + container + deploy + invoke + destroy loop before committing rea
   `await agent.invoke(prompt)` → `AgentResult`, `.toString()` for the text.
   `strands.tool({ name, description, inputSchema: z.object(...), callback })`.
 
-### Phase 1 — Real agent on Runtime, tools unchanged  ·  ~2–3 days
+### Phase 1 — Full cutover  ·  CODE DONE (2026-09-10, not yet deployed)
 
-Classic stack stays deployed in parallel until cutover.
+Single-cutover approach: `SecurityTriageAgentStack` is rewritten in place, so one
+`cdk deploy` deletes the Classic resources and creates the AgentCore Runtime in the same stack
+update. Fast path taken — **no DynamoDB session table** (leans on AgentCore Runtime's per-session
+isolation; real persistence deferred to Phase 2 Memory).
 
-0. **`aws-cdk-lib` bump task** (do first, standalone, verify a no-op redeploy):
-   - `aws-cdk-lib` 2.248 → current; add `depsLockFilePath` to all 8 `NodejsFunction` calls
-   - Resolve esbuild: pin `esbuild` in `cdk/package.json` to the version CDK wants and confirm
-     the bundler finds it, or switch those functions to Docker bundling
-   - `cdk diff` should show only asset-hash changes; deploy all four stacks; smoke-test
-   - Once green, `agent-runtime-stack.ts` can move from L1 `CfnRuntime` to L2 `Runtime`
-1. **Strands agent** (`lambda/agent/src/`) — *scaffolded in Phase 0.* Remaining: verify prompt
-   parity, tune tool descriptions against the six scenarios, decide model id.
-2. **`lambda/agent-tools/index.ts`** — *direct entry path added in Phase 0.* Remaining: once the
-   Classic agent is gone, delete the `BedrockAgentEvent` branch and `parseParams`.
-3. **Session history** — new DynamoDB table `security-triage-chat-sessions`
-   (PK `session_id`, SK `turn_ts`, TTL ~24h), wired to Strands' session/state hook.
-4. **CDK** — replace `agent-stack.ts` contents:
-   - Delete `CfnAgent`, `CfnAgentAlias`, both `actionGroups`, the `agent-prepare` custom
-     resource + provider, and the `agent-prepare` Lambda
-   - Add `agentcore.Runtime` + `RuntimeEndpoint`, the agent execution role
-     (`bedrock:InvokeModel` on the Sonnet profile + `lambda:InvokeFunction` on `agent-tools`),
-     keep the `agent-tools` Lambda and its role as-is
-   - Keep the CloudWatch log group; rename metadata from "AgentCore" cosmetics as needed
-5. **`lambda/api/chat.ts`** — replace `InvokeAgentCommand`
-   (`@aws-sdk/client-bedrock-agent-runtime`) with `InvokeAgentRuntimeCommand`
-   (`@aws-sdk/client-bedrock-agentcore`). Keep the 202 + `CHAT_PENDING` + poll pattern and the
-   self-invoke worker for now (removed in Phase 2 with streaming).
-6. **`cdk/lib/security-triage-stack.ts`** — API Lambda role: drop the `bedrock:InvokeAgent*`
-   statement (~L365), add `bedrock-agentcore:InvokeAgentRuntime` on the new Runtime ARN. Replace
-   SSM params `/security-triage/agent-id` + `/security-triage/agent-alias-id` with
-   `/security-triage/agent-runtime-arn`.
-7. **Delete** `lambda/agent-prepare/`.
-8. **Test** — the six Triage scenarios in `CLAUDE.md` end to end.
-9. **Cut over** — point `chat.ts` at the Runtime, deploy, verify, then remove the Classic
-   resources in the same or the next deploy. `aws bedrock-agent delete-agent` any orphan.
-10. **Docs** — update `CLAUDE.md` (the "Agent" section finally becomes accurate), `runbook.md`,
-    `MEMORY.md`.
+- [x] **`cdk/lib/agent-stack.ts`** rewritten: `CfnAgent` / `CfnAgentAlias` / both action groups /
+      `agent-prepare` provider+resource+lambda / `AgentCoreRole` / `AgentIdParam` / `AgentAliasIdParam`
+      **removed**. Added `DockerImageAsset` (LINUX_ARM64), `CfnRuntime` + `CfnRuntimeEndpoint`,
+      `security-triage-agent-runtime` role + one explicit `iam.Policy` the Runtime depends on,
+      `AgentRuntimeArnParam` (`/security-triage/agent-runtime-arn`). The `agent-tools` Lambda +
+      role + log group are unchanged (same logical IDs → in-place update, just loses the
+      `BedrockInvokePermission` resource policy). `SYSTEM_PROMPT` deleted (now in the container).
+- [x] **`lambda/agent-prepare/`** deleted. **`cdk/lib/agent-runtime-stack.ts`** deleted (folded in).
+- [x] **`lambda/api/chat.ts`**: `@aws-sdk/client-bedrock-agent-runtime` →
+      `@aws-sdk/client-bedrock-agentcore`; `InvokeAgentRuntimeCommand({ agentRuntimeArn,
+      runtimeSessionId, qualifier: 'prod', contentType: 'text/plain', payload })`; parse the
+      streaming response → `{ reply }`. `runtimeSessionId` padded to the 33-char minimum.
+      `ChatWorkerEvent` carries `runtimeArn` instead of `agentId`/`agentAliasId`. 202 + poll +
+      self-invoke pattern unchanged.
+- [x] **`cdk/lib/security-triage-stack.ts`**: API role `bedrock:InvokeAgent*` →
+      `bedrock-agentcore:InvokeAgentRuntime` on `runtime/*` + `runtime/*/runtime-endpoint/*`;
+      SSM read + env var → `AGENT_RUNTIME_ARN_PARAM`. `lambda/api/package.json` dep swapped.
+- [x] **`cdk/bin/app.ts`**: dropped the `deployAgentRuntime` gate — AgentStack IS the runtime now.
+- [x] **`deploy.sh` / `deploy.ps1`**: `agent-prepare` removed from the lambda build loop.
+- [x] **Docs**: `CLAUDE.md`, `docs/architecture.md`, `docs/runbook.md`, `MEMORY.md` updated.
+- [x] Verified: `cdk synth` (all 4 stacks) + every lambda `tsc --noEmit` clean.
+- [ ] **Deploy** `./deploy.sh` (Docker must be running). Then run the six Triage scenarios in
+      `CLAUDE.md` end to end through the real API/UI.
+- [ ] Optional cleanup after cutover: delete the now-dead Bedrock `BedrockAgentEvent` branch +
+      `parseParams` from `lambda/agent-tools/index.ts`; delete the `@aws-sdk/client-bedrock-agent-runtime`
+      lockfile entry.
+
+#### Deploy risks for the cutover
+
+- **CFN deletes the `agent-prepare` custom resource** on this update — it sends a `Delete` to the
+  still-deployed provider Lambda first. Verified: the old handler returns cleanly on
+  `RequestType === 'Delete'`, so this should not hang. (If it ever does:
+  `aws cloudformation continue-update-rollback`.)
+- The `agent-tools` Lambda keeps its function name/logical ID → in-place update. Good.
+- Old log group `/security-triage/agentcore` (`RemovalPolicy.DESTROY`) is deleted; new
+  `/security-triage/agent-runtime` created.
+- The classic Bedrock agent (`AQXN8YBX7D`) + alias are deleted by CFN. No manual step expected;
+  `aws bedrock-agent delete-agent` only if an orphan remains.
+- The `aws-cdk-lib` bump is **still deferred** (L1 `CfnRuntime` works). Do NOT `npm install` in
+  `cdk/` — it floats to a broken 2.268. Use `npm ci`.
+
+### Phase 1 leftover — `aws-cdk-lib` bump (standalone task, still open)
+
+- `aws-cdk-lib` 2.248 → current; add `depsLockFilePath` to all 8 `NodejsFunction` calls
+- Resolve esbuild 0.25 → 0.28 (shared install or Docker bundling)
+- `cdk diff` should show only asset-hash changes; redeploy all stacks; smoke-test
+- Once green, `agent-stack.ts` can move from L1 `CfnRuntime` to the L2 `Runtime` construct
 
 ### Phase 2 — Add managed pieces, incrementally  ·  ~1–2 days, as needed
 
