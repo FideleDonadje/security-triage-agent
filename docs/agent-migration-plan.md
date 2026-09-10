@@ -60,7 +60,7 @@ API Lambda ──InvokeAgent──▶ Bedrock       API Lambda ──InvokeAgent
 
 ## Phases
 
-### Phase 0 — Spike  ·  *scaffold done; deploy step pending Docker + creds*
+### Phase 0 — Spike  ·  **DONE (2026-09-09)** — deployed + verified end to end
 
 Prove the IaC + container + deploy + invoke + destroy loop before committing real code.
 
@@ -76,13 +76,27 @@ Prove the IaC + container + deploy + invoke + destroy loop before committing rea
       `/security-triage/agent-runtime-arn`. `tsc` clean.
 - [x] Wired into `cdk/bin/app.ts` behind `-c deployAgentRuntime=true`. `cdk list` confirms the
       stack appears only with the flag; default `cdk synth` (4 stacks) unaffected.
-- [ ] **Manual, needs Docker running + fresh AWS creds:**
-      `cd cdk && npx cdk deploy SecurityTriageAgentRuntimeStack -c deployAgentRuntime=true`,
-      then `aws bedrock-agentcore invoke-agent-runtime --agent-runtime-arn <arn> --payload '"hello"'`,
-      confirm a model response, then `npx cdk destroy SecurityTriageAgentRuntimeStack -c deployAgentRuntime=true`.
+- [x] Deployed to `898319808197`/`us-east-1`. Runtime ARN
+      `arn:aws:bedrock-agentcore:us-east-1:898319808197:runtime/security_triage_agent-awLsYx98cq`.
+      `invoke-agent-runtime` (payload = raw prompt string, `--cli-binary-format raw-in-base64-out`)
+      returns HTTP 200 + a model reply matching the ported prompt. A tool-calling prompt drove
+      `get_findings` + `get_threat_context` through the proxy → `agent-tools` Lambda → real
+      Security Hub / GuardDuty, two-role IAM split intact.
+- [ ] `cdk destroy` — not yet run (left up for Phase 1; `$0` idle).
 
-**Exit criteria:** the container builds in CDK, the Runtime deploys and responds, `cdk destroy`
-leaves nothing behind.
+**Exit criteria:** container builds in CDK ✅, Runtime deploys ✅ and responds ✅ (incl. tool calls ✅).
+
+#### Phase 0 create-time bugs (fixed, commit 19fb5a7)
+
+- IAM role `description` with an em dash → IAM only accepts Latin-1. Use a hyphen. Watch every
+  string that reaches an AWS API for smart punctuation.
+- AgentCore validates the execution role can pull the ECR image *at Runtime create time*. The
+  role's inline `DefaultPolicy` was still attaching in parallel → `Access denied while
+  validating ECR URI`. Fix: put all perms in one explicit `iam.Policy` and
+  `runtime.node.addDependency(policy)`; spell out `ecr:GetAuthorizationToken` on `*` + pull
+  actions on the repo ARN rather than relying on `grantPull` ordering.
+- Runtime logs did not appear in `/security-triage/agent-runtime` via `logs tail` — observability
+  wiring (CloudWatch Transaction Search / OTEL) is a Phase 2 item; not blocking.
 
 #### Phase 0 findings
 
