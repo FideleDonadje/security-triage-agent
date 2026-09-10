@@ -68,43 +68,61 @@ export class AgentRuntimeStack extends cdk.Stack {
         },
       }),
       description:
-        'AgentCore Runtime execution role — InvokeModel + pull image + invoke agent-tools Lambda only',
+        'AgentCore Runtime execution role - InvokeModel + pull image + invoke agent-tools Lambda only',
     });
 
-    // Bedrock: invoke the foundation model (cross-region inference profile + FM ARNs)
-    executionRole.addToPolicy(
-      new iam.PolicyStatement({
-        sid: 'BedrockInvokeModel',
-        effect: iam.Effect.ALLOW,
-        actions: [
-          'bedrock:InvokeModel',
-          'bedrock:InvokeModelWithResponseStream',
-          'bedrock:GetInferenceProfile',
-        ],
-        resources: [
-          `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/${MODEL_ID}`,
-          'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0',
-          'arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0',
-          'arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0',
-        ],
-      }),
-    );
-
-    // Lambda: invoke the agent-tools Lambda (which holds its own restricted role)
-    executionRole.addToPolicy(
-      new iam.PolicyStatement({
-        sid: 'InvokeAgentToolsLambda',
-        effect: iam.Effect.ALLOW,
-        actions: ['lambda:InvokeFunction'],
-        resources: [props.agentToolsFunctionArn],
-      }),
-    );
-
-    // ECR: pull the agent's own container image
-    image.repository.grantPull(executionRole);
-
-    // CloudWatch: write to the runtime audit log group only
-    logGroup.grantWrite(executionRole);
+    // All permissions in ONE explicit policy so the Runtime can depend on it.
+    // AgentCore validates the execution role can pull the ECR image at Runtime
+    // create time — if the role's inline policy is still attaching in parallel,
+    // creation fails with "Access denied while validating ECR URI".
+    const executionPolicy = new iam.Policy(this, 'AgentRuntimePolicy', {
+      roles: [executionRole],
+      statements: [
+        // Bedrock: invoke the foundation model (inference profile + FM ARNs)
+        new iam.PolicyStatement({
+          sid: 'BedrockInvokeModel',
+          effect: iam.Effect.ALLOW,
+          actions: [
+            'bedrock:InvokeModel',
+            'bedrock:InvokeModelWithResponseStream',
+            'bedrock:GetInferenceProfile',
+          ],
+          resources: [
+            `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/${MODEL_ID}`,
+            'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0',
+            'arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0',
+            'arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0',
+          ],
+        }),
+        // Lambda: invoke the agent-tools Lambda (which holds its own restricted role)
+        new iam.PolicyStatement({
+          sid: 'InvokeAgentToolsLambda',
+          effect: iam.Effect.ALLOW,
+          actions: ['lambda:InvokeFunction'],
+          resources: [props.agentToolsFunctionArn],
+        }),
+        // ECR: pull the agent's own container image
+        new iam.PolicyStatement({
+          sid: 'EcrAuth',
+          effect: iam.Effect.ALLOW,
+          actions: ['ecr:GetAuthorizationToken'],
+          resources: ['*'],
+        }),
+        new iam.PolicyStatement({
+          sid: 'EcrPullImage',
+          effect: iam.Effect.ALLOW,
+          actions: ['ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer', 'ecr:BatchCheckLayerAvailability'],
+          resources: [image.repository.repositoryArn],
+        }),
+        // CloudWatch: write to the runtime audit log group only
+        new iam.PolicyStatement({
+          sid: 'CloudWatchLogs',
+          effect: iam.Effect.ALLOW,
+          actions: ['logs:CreateLogStream', 'logs:PutLogEvents', 'logs:DescribeLogStreams'],
+          resources: [logGroup.logGroupArn, `${logGroup.logGroupArn}:*`],
+        }),
+      ],
+    });
 
     // ── AgentCore Runtime (L1) ───────────────────────────────────────────────
     const runtime = new agentcore.CfnRuntime(this, 'TriageAgentRuntime', {
@@ -122,6 +140,10 @@ export class AgentRuntimeStack extends cdk.Stack {
         AGENT_TOOLS_FUNCTION_NAME,
       },
     });
+
+    // The Runtime must not be created until the execution role can actually pull
+    // the image and call Bedrock — see the comment on executionPolicy above.
+    runtime.node.addDependency(executionPolicy);
 
     const endpoint = new agentcore.CfnRuntimeEndpoint(this, 'TriageAgentRuntimeEndpoint', {
       agentRuntimeId: runtime.attrAgentRuntimeId,

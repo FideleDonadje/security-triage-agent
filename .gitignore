@@ -52,3 +52,4 @@ coverage/
 # ── Logs ───────────────────────────────────────────────────────────────────────
 *.log
 npm-debug.log*
+cdk-outputs-agentruntime.json
