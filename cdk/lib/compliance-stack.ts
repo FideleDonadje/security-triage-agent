@@ -29,12 +29,12 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNode from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
-import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct, IConstruct } from 'constructs';
+import { STANDARD_BUNDLING, createLogGroup } from './lambda-defaults';
 
 export const SSM_SYSTEMS_TABLE  = '/security-triage/systems-table-name';
 export const SSM_COMPLIANCE_BUCKET = '/security-triage/compliance-bucket-name';
@@ -136,23 +136,12 @@ export class ComplianceStack extends cdk.Stack {
     });
 
     // ── CloudWatch log groups ──────────────────────────────────────────────
-    const workerLogGroup = new logs.LogGroup(this, 'ComplianceWorkerLogs', {
-      logGroupName:  '/aws/lambda/security-triage-compliance-worker',
-      retention:     logs.RetentionDays.THREE_MONTHS,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
-    (workerLogGroup.node.defaultChild as logs.CfnLogGroup).addMetadata('checkov', {
-      skip: [{ id: 'CKV_AWS_158', comment: 'KMS encryption on logs deferred to prod tier' }],
-    });
-
-    const repairLogGroup = new logs.LogGroup(this, 'ComplianceRepairLogs', {
-      logGroupName:  '/aws/lambda/security-triage-compliance-repair',
-      retention:     logs.RetentionDays.THREE_MONTHS,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
-    (repairLogGroup.node.defaultChild as logs.CfnLogGroup).addMetadata('checkov', {
-      skip: [{ id: 'CKV_AWS_158', comment: 'KMS encryption on logs deferred to prod tier' }],
-    });
+    const workerLogGroup = createLogGroup(
+      this, 'ComplianceWorkerLogs', '/aws/lambda/security-triage-compliance-worker',
+    );
+    const repairLogGroup = createLogGroup(
+      this, 'ComplianceRepairLogs', '/aws/lambda/security-triage-compliance-repair',
+    );
 
     // ── IAM: compliance-worker role ────────────────────────────────────────
     const workerRole = new iam.Role(this, 'ComplianceWorkerRole', {
@@ -292,7 +281,7 @@ export class ComplianceStack extends cdk.Stack {
       timeout:      cdk.Duration.minutes(15),
       memorySize:   1024,
       logGroup:     workerLogGroup,
-      bundling:     { minify: true, sourceMap: true, externalModules: [] },
+      bundling:     STANDARD_BUNDLING,
       environment: {
         SYSTEMS_TABLE_NAME: this.systemsTable.tableName,
         COMPLIANCE_BUCKET:  this.complianceBucket.bucketName,
@@ -340,7 +329,7 @@ export class ComplianceStack extends cdk.Stack {
       timeout:      cdk.Duration.seconds(60),
       memorySize:   256,
       logGroup:     repairLogGroup,
-      bundling:     { minify: true, sourceMap: true, externalModules: [] },
+      bundling:     STANDARD_BUNDLING,
       environment: {
         SYSTEMS_TABLE_NAME:  this.systemsTable.tableName,
         STATUS_INDEX_NAME:   'status-all-index',

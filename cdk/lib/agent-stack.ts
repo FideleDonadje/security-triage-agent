@@ -38,9 +38,9 @@ import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNode from 'aws-cdk-lib/aws-lambda-nodejs';
-import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
+import { STANDARD_BUNDLING, createLogGroup } from './lambda-defaults';
 
 // Well-known SSM parameter names
 export const SSM_AGENT_RUNTIME_ARN  = '/security-triage/agent-runtime-arn';
@@ -73,23 +73,10 @@ export class AgentStack extends cdk.Stack {
     super(scope, id, props);
 
     // ── Log groups — 90-day retention ────────────────────────────────────────
-    const runtimeLogGroup = new logs.LogGroup(this, 'AgentRuntimeLogs', {
-      logGroupName: '/security-triage/agent-runtime',
-      retention: logs.RetentionDays.THREE_MONTHS,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
-    (runtimeLogGroup.node.defaultChild as logs.CfnLogGroup).addMetadata('checkov', {
-      skip: [{ id: 'CKV_AWS_158', comment: 'KMS encryption on logs deferred to prod tier' }],
-    });
-
-    const agentToolsLogGroup = new logs.LogGroup(this, 'AgentToolsLogs', {
-      logGroupName: '/aws/lambda/security-triage-agent-tools',
-      retention: logs.RetentionDays.THREE_MONTHS,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
-    (agentToolsLogGroup.node.defaultChild as logs.CfnLogGroup).addMetadata('checkov', {
-      skip: [{ id: 'CKV_AWS_158', comment: 'KMS encryption on logs deferred to prod tier' }],
-    });
+    const runtimeLogGroup = createLogGroup(this, 'AgentRuntimeLogs', '/security-triage/agent-runtime');
+    const agentToolsLogGroup = createLogGroup(
+      this, 'AgentToolsLogs', '/aws/lambda/security-triage-agent-tools',
+    );
 
     // ── Action Group Lambda IAM Role ───────────────────────────────────────
     // Assumed by the Lambda that executes the agent tools. Read-only AWS +
@@ -270,11 +257,7 @@ export class AgentStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(30),
       memorySize: 512,
       logGroup: agentToolsLogGroup,
-      bundling: {
-        minify: true,
-        sourceMap: true,
-        externalModules: [],
-      },
+      bundling: STANDARD_BUNDLING,
       environment: {
         TABLE_NAME: props.taskTableName,
         STATUS_INDEX_NAME: props.statusIndexName,
