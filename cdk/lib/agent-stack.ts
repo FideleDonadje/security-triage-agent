@@ -7,9 +7,9 @@
  * maintenance mode on 2026-07-30. See docs/agent-migration-plan.md.
  *
  * Responsibilities:
- *   - Builds the Strands agent container (lambda/agent) and runs it on AgentCore
+ *   - Builds the Strands agent container (agent/) and runs it on AgentCore
  *     Runtime. The agent's system prompt and 13 tool definitions live in the
- *     container (lambda/agent/src/), not here.
+ *     container (agent/src/), not here.
  *   - Deploys the agent-tools Lambda (security-triage-agent-tools) that executes
  *     every tool: get_findings, get_threat_context, get_config_status,
  *     get_trail_events, get_tag_compliance, get_enabled_standards,
@@ -294,7 +294,7 @@ export class AgentStack extends cdk.Stack {
 
     // ── Strands agent container image (built for linux/arm64) ────────────────
     const agentImage = new ecrAssets.DockerImageAsset(this, 'AgentImage', {
-      directory: path.join(__dirname, '../../lambda/agent'),
+      directory: path.join(__dirname, '../../agent'),
       platform: ecrAssets.Platform.LINUX_ARM64, // AgentCore Runtime requirement
     });
 

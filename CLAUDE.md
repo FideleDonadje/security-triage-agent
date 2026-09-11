@@ -71,11 +71,12 @@ Design specs and operational docs in `docs/`:
 - Task write actions are separate from Execution Lambda trigger (stream-based)
 
 ### Agent
-- Strands Agents SDK (TypeScript) app in `lambda/agent/`, hosted on Amazon Bedrock AgentCore Runtime
-  (migrated 2026-09 from classic Bedrock Agents — see `docs/agent-migration-plan.md`)
-- Container: `lambda/agent/Dockerfile` (node:22-slim, linux/arm64), exposes `/ping` + `/invocations`
+- Strands Agents SDK (TypeScript) app in `agent/` (top-level — it's a container, not a Lambda),
+  hosted on Amazon Bedrock AgentCore Runtime (migrated 2026-09 from classic Bedrock Agents —
+  see `docs/agent-migration-plan.md`)
+- Container: `agent/Dockerfile` (node:22-slim, linux/arm64), exposes `/ping` + `/invocations`
 - Claude Sonnet on Bedrock (cross-region inference profile) via `strands.BedrockModel`
-- System prompt + 13 tool definitions live in `lambda/agent/src/` (prompt.ts, tools.ts)
+- System prompt + 13 tool definitions live in `agent/src/` (prompt.ts, tools.ts)
 - Tools are thin proxies: each forwards `{ tool, input }` to the `agent-tools` Lambda (its own
   restricted role — read-only AWS + DynamoDB PutItem/UpdateItem). The Runtime execution role can
   only InvokeModel, pull its image, and invoke that one Lambda.
@@ -271,6 +272,10 @@ All outputs written by CDK at deploy time. No manual env vars or cdk-outputs.jso
 │   │   ├── compliance-stack.ts        ← systems table, compliance worker + repair Lambdas, S3, SQS DLQ, EventBridge
 │   │   └── frontend-stack.ts          ← S3 + CloudFront
 │   └── package.json
+├── agent/                      ← Strands agent — a container (runs on AgentCore Runtime), not a
+│   │                              Lambda, so it lives outside lambda/
+│   ├── Dockerfile               ← node:22-slim, linux/arm64, /ping + /invocations
+│   └── src/                     ← index.ts (Express), agent.ts, prompt.ts, tools.ts (13 proxy tools)
 ├── lambda/
 │   ├── api/                    ← Node.js API layer
 │   │   ├── index.ts            ← handler entry point + CORS
@@ -282,10 +287,7 @@ All outputs written by CDK at deploy time. No manual env vars or cdk-outputs.jso
 │   │   ├── index.ts
 │   │   ├── enable-logging.ts
 │   │   └── apply-tags.ts
-│   ├── agent/                  ← Strands agent (runs on AgentCore Runtime)
-│   │   ├── Dockerfile          ← node:22-slim, linux/arm64, /ping + /invocations
-│   │   └── src/                ← index.ts (Express), agent.ts, prompt.ts, tools.ts (13 proxy tools)
-│   ├── agent-tools/            ← agent tool executor (Strands { tool, input } + legacy Bedrock shape)
+│   ├── agent-tools/            ← agent tool executor — invoked by the Strands agent with { tool, input }
 │   │   └── index.ts
 │   ├── ato-trigger/            ← ATO API handler (create job, poll status)
 │   │   └── index.ts

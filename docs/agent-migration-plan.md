@@ -64,10 +64,10 @@ API Lambda ──InvokeAgent──▶ Bedrock       API Lambda ──InvokeAgent
 
 Prove the IaC + container + deploy + invoke + destroy loop before committing real code.
 
-- [x] `lambda/agent/` — Strands TS app: `GET /ping`, `POST /invocations`, `BedrockModel` on the
+- [x] `agent/` — Strands TS app: `GET /ping`, `POST /invocations`, `BedrockModel` on the
       Sonnet profile, **all 13 tools** wired as `strands.tool()` proxies to the `agent-tools`
       Lambda (`src/prompt.ts`, `src/tools.ts`, `src/agent.ts`, `src/index.ts`). `tsc` clean.
-- [x] `lambda/agent/Dockerfile` — `node:22-slim`, multi-stage, listens on 8080. `.dockerignore`.
+- [x] `agent/Dockerfile` — `node:22-slim`, multi-stage, listens on 8080. `.dockerignore`.
 - [x] `lambda/agent-tools/index.ts` — added the `{ tool, input } → { body }` direct entry path
       alongside the Bedrock action-group handler (`runTool` shared dispatch). `tsc` clean.
 - [x] `cdk/lib/agent-runtime-stack.ts` — `CfnRuntime` (L1) + `CfnRuntimeEndpoint` +

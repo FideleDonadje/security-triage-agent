@@ -134,8 +134,7 @@ aws ssm put-parameter \
 | `TASKS_TABLE_NAME` | `security-triage-tasks` |
 | `SYSTEMS_TABLE_NAME` | `security-triage-systems` |
 | `COMPLIANCE_BUCKET` | `security-triage-compliance-{account}-{region}` |
-| `AGENT_ID` | From SSM at deploy time |
-| `AGENT_ALIAS_ID` | From SSM at deploy time |
+| `AGENT_RUNTIME_ARN` | From SSM at deploy time |
 | `USER_POOL_ID` | From SSM at deploy time |
 | `REGION` | AWS region |
 
@@ -313,7 +312,7 @@ async function getMyNewTool(params: Record<string, string>): Promise<string> {
 
 **Step 2 — Register the Strands tool**
 
-In `lambda/agent/src/tools.ts`, add a `proxyTool('get_my_new_tool', '<description>', z.object({ ... }))`
+In `agent/src/tools.ts`, add a `proxyTool('get_my_new_tool', '<description>', z.object({ ... }))`
 entry. No schema goes anywhere else — the Zod schema is the contract.
 
 **Step 3 — Add IAM permissions**

@@ -231,15 +231,16 @@ flowchart TB
 │       ├── agent-stack.ts            # Strands agent on AgentCore Runtime + agent-tools Lambda
 │       ├── compliance-stack.ts       # Compliance Workspace: systems table, worker + repair Lambdas, S3, SQS DLQ, EventBridge
 │       └── frontend-stack.ts         # S3 + CloudFront for React SPA
+├── agent/                        # Strands agent — a container (runs on AgentCore Runtime),
+│   │                                not a Lambda, so it lives outside lambda/
+│   ├── Dockerfile                # node:22-slim, linux/arm64, /ping + /invocations
+│   └── src/                      # index.ts (Express), agent.ts, prompt.ts, tools.ts
 ├── lambda/
 │   ├── api/                      # Node.js API layer
 │   │   ├── index.ts              # Handler entry point + CORS
 │   │   ├── auth.ts               # Cognito JWT validation
 │   │   ├── chat.ts               # Async AgentCore Runtime proxy (POST→202, GET poll)
 │   │   └── tasks.ts              # Task queue CRUD + compliance workspace routes
-│   ├── agent/                    # Strands agent — runs on AgentCore Runtime
-│   │   ├── Dockerfile            # node:22-slim, linux/arm64, /ping + /invocations
-│   │   └── src/                  # index.ts (Express), agent.ts, prompt.ts, tools.ts
 │   ├── agent-tools/              # Agent tool executor (invoked by the Strands agent)
 │   │   └── index.ts              # get_findings, get_threat_context, get_tag_compliance,
 │   │                             #   get_enabled_standards, get_compliance_report,

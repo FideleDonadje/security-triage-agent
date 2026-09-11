@@ -62,7 +62,7 @@ API Gateway has a 29-second timeout. Agent turns with multiple tool calls can ta
 - Write access to DynamoDB only — zero write access to AWS services
 
 ### Strands Agent on AgentCore Runtime (security_triage_agent)
-- Strands Agents SDK (TypeScript) container (`lambda/agent/`), hosted on Amazon Bedrock
+- Strands Agents SDK (TypeScript) container (`agent/`), hosted on Amazon Bedrock
   AgentCore Runtime — a linux/arm64 image exposing `/ping` + `/invocations`
 - Claude Sonnet 4.5 via US cross-region inference profile
 - Owns the agent loop and tool execution; system prompt + 13 tool definitions live in the
@@ -156,10 +156,10 @@ PENDING → CANCELLED              (agent retracts via cancel_task)
 
 | Role | Key Permissions |
 |------|----------------|
-| security-triage-api-lambda | DynamoDB CRUD, bedrock:InvokeAgent, lambda:InvokeFunction (self), ssm:GetParameter |
+| security-triage-api-lambda | DynamoDB CRUD, bedrock-agentcore:InvokeAgentRuntime, lambda:InvokeFunction (self), ssm:GetParameter |
 | security-triage-agent-tools-lambda | SecurityHub/GuardDuty/Config/CloudTrail read, DynamoDB PutItem+UpdateItem+Query, DENY DeleteItem |
 | security-triage-execution-lambda | DynamoDB stream+UpdateItem, S3 logging+tagging, DENY destructive S3 |
-| security-triage-agentcore | bedrock:InvokeModel, CloudWatch logs (agent audit group only) |
+| security-triage-agent-runtime | bedrock:InvokeModel, ECR pull (agent image), lambda:InvokeFunction (agent-tools), CloudWatch logs |
 
 ---
 
