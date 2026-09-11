@@ -167,8 +167,30 @@ isolation; real persistence deferred to Phase 2 Memory).
 
 ### Phase 1 leftover — `aws-cdk-lib` bump (standalone task, still open)
 
-- `aws-cdk-lib` 2.248 → current; add `depsLockFilePath` to all 8 `NodejsFunction` calls
-- Resolve esbuild 0.25 → 0.28 (shared install or Docker bundling)
+**Attempted 2026-09-11, reverted.** Two Windows-specific bundling failures hit in sequence:
+
+1. Fixing `PathNotUnderRoot` with `projectRoot` (repo root) + `depsLockFilePath` (cdk's own
+   lockfile) gets past the entry-path error, but `NodejsFunction`'s local esbuild resolution
+   then wants an esbuild install it can't find from `projectRoot` (`npx --no-install esbuild`
+   fails looking for a specific version — `PackageInstallation.detect('esbuild')` doesn't
+   resolve the cdk/node_modules copy once `projectRoot` no longer points at `cdk/`).
+2. Working around that with `bundling.forceDockerBundling: true` gets esbuild to run
+   successfully **inside Docker** (bundled output is produced correctly), but the final
+   rename of the bundling-temp directory then fails with `EPERM: operation not permitted` —
+   consistently, not transient. This is a known class of Windows + Docker Desktop file-locking
+   issue in CDK asset bundling, unrelated to this repo's code.
+
+Reverted cleanly (`git checkout` + `npm ci`) — `aws-cdk-lib` stays pinned at `2.248.0`,
+matching every deployed stack. L1 `CfnRuntime` remains the approach.
+
+**Before retrying:** do this from a non-Windows environment (Linux CI runner, WSL2 native
+filesystem instead of a `/mnt/d`-style Windows-drive mount, or macOS) where the Docker-bundling
+rename issue doesn't apply. Steps once environment is right:
+
+- `aws-cdk-lib` 2.248 → current; add `projectRoot` + `depsLockFilePath` to all 8
+  `NodejsFunction` calls (repo root / cdk's lockfile, or per-lambda lockfiles — either works)
+- Either get local esbuild resolving cleanly (may need an esbuild install reachable from
+  `projectRoot`) or accept Docker bundling (only viable off Windows, per above)
 - `cdk diff` should show only asset-hash changes; redeploy all stacks; smoke-test
 - Once green, `agent-stack.ts` can move from L1 `CfnRuntime` to the L2 `Runtime` construct
 
