@@ -503,6 +503,23 @@ aws lambda delete-function-concurrency \
 
 ## 10. Troubleshooting
 
+### `cdk deploy`/`cdk synth` fails with `EPERM: operation not permitted, rename 'bundling-temp-...'` (Windows)
+
+**Symptom:** Deploy fails mid-bundle with an `EPERM` rename error on a `cdk.out\bundling-temp-<hash>`
+directory. Often disappears on a plain retry.
+
+**Cause:** Known CDK bug — [aws/aws-cdk#25711](https://github.com/aws/aws-cdk/issues/25711).
+When multiple `NodejsFunction` Lambdas bundle concurrently, CDK can generate a shared
+`bundling-temp-<hash>` directory name; the first process to finish renames (and deletes) it,
+and a still-running concurrent process then fails the same rename. POSIX systems mostly
+tolerate this; Windows' stricter file-locking surfaces it as `EPERM`.
+
+**Fix:** `deploy.sh` and `deploy.ps1` already pass `--asset-parallelism false` on every
+`cdk deploy` call, which serializes bundling and avoids the race — this should not occur when
+deploying through those scripts. If you run `cdk deploy`/`cdk synth` manually, add the same
+flag (`cdk synth` doesn't accept it directly — only `cdk deploy` does). As a fallback, a plain
+retry works because the race is timing-dependent, not deterministic.
+
 ### Document stuck IN_PROGRESS, never times out
 
 **Symptom:** A compliance document shows "Generating…" in the UI for more than 15 minutes and never transitions to FAILED.

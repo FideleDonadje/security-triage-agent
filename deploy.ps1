@@ -71,7 +71,7 @@ Pop-Location
 Write-Host ""
 Write-Host "==> Pass 1: deploying FrontendStack..."
 Push-Location cdk
-cdk deploy SecurityTriageFrontendStack --require-approval never --no-notices
+cdk deploy SecurityTriageFrontendStack --require-approval never --no-notices --asset-parallelism false
 if ($LASTEXITCODE -ne 0) { Pop-Location; exit 1 }
 Pop-Location
 
@@ -81,13 +81,17 @@ $CloudFrontUrl = aws ssm get-parameter `
   --query Parameter.Value --output text
 Write-Host "    CloudFront URL: $CloudFrontUrl"
 
-# ── Step 4: Pass 2 — deploy SecurityTriageStack + AgentStack ──────────────────
+# ── Step 4: Pass 2 — deploy SecurityTriageStack + AgentStack + ComplianceStack ─
+# --asset-parallelism false: this pass bundles several NodejsFunction Lambdas at
+# once. A known CDK race (github.com/aws/aws-cdk#25711) can rename/delete a shared
+# bundling-temp-<hash> dir out from under a concurrent bundle, which POSIX
+# tolerates but Windows surfaces as EPERM. Serializing bundling avoids it.
 Write-Host ""
-Write-Host "==> Pass 2: deploying SecurityTriageStack + AgentStack..."
+Write-Host "==> Pass 2: deploying SecurityTriageStack + AgentStack + ComplianceStack..."
 Push-Location cdk
-cdk deploy SecurityTriageStack SecurityTriageAgentStack `
+cdk deploy SecurityTriageStack SecurityTriageAgentStack SecurityTriageComplianceStack `
   --context "frontendUrl=$CloudFrontUrl" `
-  --require-approval never --no-notices `
+  --require-approval never --no-notices --asset-parallelism false `
   --outputs-file ..\cdk-outputs.json
 if ($LASTEXITCODE -ne 0) { Pop-Location; exit 1 }
 Pop-Location
