@@ -86,39 +86,9 @@ async function getRequiredTagKeys(): Promise<string[]> {
   return cachedRequiredTagKeys;
 }
 
-// ── Bedrock action group event types ─────────────────────────────────────────
-
-interface BedrockParameter {
-  name: string;
-  type: string;
-  value: string;
-}
-
-interface BedrockAgentEvent {
-  messageVersion: string;
-  agent: Record<string, unknown>;
-  sessionId: string;
-  actionGroup: string;
-  function: string;
-  parameters?: BedrockParameter[];
-}
-
-interface BedrockAgentResponse {
-  messageVersion: string;
-  response: {
-    actionGroup: string;
-    function: string;
-    functionResponse: {
-      responseBody: {
-        TEXT: { body: string };
-      };
-    };
-  };
-}
-
 // ── Tool dispatch ─────────────────────────────────────────────────────────────
-// All tool params are string-valued: the Bedrock action-group event delivers them
-// that way, and the Strands proxy (see below) stringifies before calling.
+// All tool params are string-valued: the Strands proxy (lambda/agent) stringifies
+// every input value before calling.
 
 async function runTool(fn: string, params: Record<string, string>): Promise<string> {
   try {
@@ -146,40 +116,17 @@ async function runTool(fn: string, params: Record<string, string>): Promise<stri
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
-// Two callers:
-//   1. Bedrock Agents Classic action group → { function, actionGroup, parameters:[] }
-//   2. Strands agent proxy (lambda/agent) → { tool, input:{} } → { body }
-// Path 2 is the migration target (see docs/agent-migration-plan.md). Path 1 stays
-// until the Classic agent is torn down.
+// Invoked by the Strands agent proxy (lambda/agent) with { tool, input } and
+// returns { body }. The classic Bedrock action-group event shape was removed
+// once the migration to AgentCore Runtime completed — see docs/agent-migration-plan.md.
 
 interface DirectToolEvent {
   tool: string;
   input?: Record<string, unknown>;
 }
 
-type ToolEvent = BedrockAgentEvent | DirectToolEvent;
-
-function isBedrockEvent(e: ToolEvent): e is BedrockAgentEvent {
-  return typeof (e as BedrockAgentEvent).function === 'string';
-}
-
-export const handler = async (
-  event: ToolEvent,
-): Promise<BedrockAgentResponse | { body: string }> => {
-  if (isBedrockEvent(event)) {
-    const params = parseParams(event.parameters ?? []);
-    const body = await runTool(event.function, params);
-    return {
-      messageVersion: '1.0',
-      response: {
-        actionGroup: event.actionGroup,
-        function: event.function,
-        functionResponse: { responseBody: { TEXT: { body } } },
-      },
-    };
-  }
-
-  // Direct (Strands) path — coerce every input value to a string
+export const handler = async (event: DirectToolEvent): Promise<{ body: string }> => {
+  // Coerce every input value to a string — the tool functions expect Record<string, string>
   const params = Object.fromEntries(
     Object.entries(event.input ?? {}).map(([k, v]) => [
       k,
@@ -970,11 +917,3 @@ async function getAccessAnalyzer(params: Record<string, string>): Promise<string
   }, null, 2);
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function parseParams(parameters: BedrockParameter[]): Record<string, string> {
-  return parameters.reduce<Record<string, string>>((acc, p) => {
-    acc[p.name] = p.value;
-    return acc;
-  }, {});
-}

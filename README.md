@@ -228,21 +228,22 @@ flowchart TB
 │   ├── bin/app.ts                # CDK app entry point — instantiates all stacks
 │   └── lib/
 │       ├── security-triage-stack.ts  # Core: Cognito, DynamoDB, Lambdas, API GW, WAF, S3
-│       ├── agent-stack.ts            # Bedrock AgentCore IAM role + auto-prepare resource
+│       ├── agent-stack.ts            # Strands agent on AgentCore Runtime + agent-tools Lambda
 │       ├── compliance-stack.ts       # Compliance Workspace: systems table, worker + repair Lambdas, S3, SQS DLQ, EventBridge
 │       └── frontend-stack.ts         # S3 + CloudFront for React SPA
 ├── lambda/
 │   ├── api/                      # Node.js API layer
 │   │   ├── index.ts              # Handler entry point + CORS
 │   │   ├── auth.ts               # Cognito JWT validation
-│   │   ├── chat.ts               # Async Bedrock AgentCore proxy (POST→202, GET poll)
+│   │   ├── chat.ts               # Async AgentCore Runtime proxy (POST→202, GET poll)
 │   │   └── tasks.ts              # Task queue CRUD + compliance workspace routes
-│   ├── agent-tools/              # Bedrock action group handler
+│   ├── agent/                    # Strands agent — runs on AgentCore Runtime
+│   │   ├── Dockerfile            # node:22-slim, linux/arm64, /ping + /invocations
+│   │   └── src/                  # index.ts (Express), agent.ts, prompt.ts, tools.ts
+│   ├── agent-tools/              # Agent tool executor (invoked by the Strands agent)
 │   │   └── index.ts              # get_findings, get_threat_context, get_tag_compliance,
 │   │                             #   get_enabled_standards, get_compliance_report,
 │   │                             #   queue_task, cancel_task, get_task_queue, etc.
-│   ├── agent-prepare/            # CDK custom resource — prepares agent after deploy
-│   │   └── index.ts
 │   ├── execution/                # Execution Lambda — Tier 1 remediation actions
 │   │   ├── index.ts              # Handler + DynamoDB stream parser
 │   │   ├── enable-logging.ts     # S3 PutBucketLogging
@@ -380,7 +381,7 @@ This single script handles everything:
 >   `cdk deploy -c cognitoDomainPrefix=my-custom-prefix`
 > - Cognito callback URLs (CloudFront + localhost for local dev)
 > - `ALLOWED_ORIGIN` on the API Lambda (set to the CloudFront URL)
-> - Bedrock Agent ID and alias ID written to SSM — API Lambda reads them at cold start
+> - AgentCore Runtime ARN written to SSM — API Lambda reads it at cold start
 
 ### Step 2 — Run the two commands printed by the script
 

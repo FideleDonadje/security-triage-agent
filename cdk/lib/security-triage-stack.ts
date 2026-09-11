@@ -384,7 +384,7 @@ export class SecurityTriageStack extends cdk.Stack {
     // ── Lambda: API Layer (NodejsFunction — esbuild bundles TS) ───────────
     this.apiLambda = new lambdaNode.NodejsFunction(this, 'ApiLambda', {
       functionName: 'security-triage-api',
-      description: 'REST API handler: validates Cognito JWT, proxies chat to Bedrock Agent, manages task queue CRUD in DynamoDB',
+      description: 'REST API handler: validates Cognito JWT, proxies chat to the AgentCore Runtime, manages task queue CRUD in DynamoDB',
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
       entry: path.join(__dirname, '../../lambda/api/index.ts'),

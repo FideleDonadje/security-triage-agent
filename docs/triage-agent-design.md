@@ -30,7 +30,7 @@ approval, and executes safe actions autonomously after the analyst approves them
 
 ### Request Flow
 ```
-Browser → CloudFront → API Gateway → API Lambda → Bedrock Agent
+Browser → CloudFront → API Gateway → API Lambda → AgentCore Runtime (Strands agent)
                                          ↓                ↓
                                       DynamoDB        Agent Tools Lambda
                                       (task queue)    (SecurityHub, GuardDuty,
@@ -40,7 +40,7 @@ DynamoDB Stream (status=APPROVED) → Execution Lambda → AWS Resources
 ```
 
 ### Async Chat Pattern
-API Gateway has a 29-second timeout. Bedrock multi-tool calls can take longer.
+API Gateway has a 29-second timeout. Agent turns with multiple tool calls can take longer.
 - `POST /chat` → API Lambda validates JWT, invokes itself asynchronously, returns `202 + request_id`
 - `GET /chat/result/{request_id}` → client polls until result is ready (stored in DynamoDB with 2-hour TTL)
 
@@ -61,14 +61,16 @@ API Gateway has a 29-second timeout. Bedrock multi-tool calls can take longer.
   POST /tasks/{id}/approve, POST /tasks/{id}/reject, DELETE /tasks/{id}
 - Write access to DynamoDB only — zero write access to AWS services
 
-### Bedrock Agent (security-triage-agent)
+### Strands Agent on AgentCore Runtime (security_triage_agent)
+- Strands Agents SDK (TypeScript) container (`lambda/agent/`), hosted on Amazon Bedrock
+  AgentCore Runtime — a linux/arm64 image exposing `/ping` + `/invocations`
 - Claude Sonnet 4.5 via US cross-region inference profile
-- Owns the agent loop, tool execution, and session memory (30-minute idle TTL)
-- System prompt defines role, available tools, rules, and communication style
+- Owns the agent loop and tool execution; system prompt + 13 tool definitions live in the
+  container (prompt.ts, tools.ts)
 - NEVER executes AWS actions directly — only writes to DynamoDB via queue_task
 
 ### Agent Tools Lambda (security-triage-agent-tools)
-- Executes all agent tools as a Bedrock action group
+- Executes all agent tools; invoked by the Strands agent with `{ tool, input }`
 - Read-only AWS access: SecurityHub, GuardDuty, Config, CloudTrail, ResourceGroupsTaggingAPI,
   IAM, Cost Explorer, Access Analyzer
 - Write access: DynamoDB PutItem (queue_task) + UpdateItem (cancel_task) only
@@ -180,7 +182,7 @@ PENDING → CANCELLED              (agent retracts via cancel_task)
 |-------|----------|
 | SecurityTriageFrontendStack | S3 bucket, CloudFront distribution |
 | SecurityTriageStack | Cognito, DynamoDB, API Lambda, Execution Lambda, API Gateway, WAF, S3 access logs bucket |
-| SecurityTriageAgentStack | Bedrock Agent, Agent Tools Lambda, Agent Prepare Lambda, IAM roles |
+| SecurityTriageAgentStack | AgentCore Runtime (Strands agent container), Agent Tools Lambda, IAM roles |
 
 ### WAF (REGIONAL, on API Gateway)
 - AWSManagedRulesCommonRuleSet (OWASP)
