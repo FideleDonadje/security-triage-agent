@@ -7,6 +7,9 @@ cdk.out/
 *.js.map
 *.d.ts
 
+# ── Scan tool output — regenerate locally, never commit ────────────────────────
+gitleaks-results.json
+
 # ── Environment / secrets — NEVER commit these ────────────────────────────────
 .env
 .env.local
