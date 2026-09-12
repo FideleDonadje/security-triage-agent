@@ -1,6 +1,8 @@
 # Agent Tier Migration — Classic Bedrock Agents → Strands on AgentCore Runtime
 
-**Status:** in progress (Phase 0). Branch `feature/agent-agentcore`.
+**Status:** Phase 1 deployed to production and live-verified (2026-09-11). Branch
+`feature/agent-agentcore` → [PR #34](https://github.com/FideleDonadje/security-triage-agent/pull/34).
+Phase 2 (Gateway, Memory, streaming, Observability) not started — optional, as-needed.
 **Scope:** the Triage Agent loop only. ATO Assist, Compliance Workspace, task queue,
 Execution Lambda, approval flow, API routes/auth, and the frontend contract do **not** change.
 

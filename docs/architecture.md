@@ -333,29 +333,26 @@ agents, and are unaffected by anything in this section.
 └───────────────────────────────────────────────────────┘
 ```
 
-### Current implementation — classic Bedrock Agents (being migrated)
+### Current implementation — Strands on AgentCore Runtime
 
-`InvokeAgent` is called once per analyst message; the **Bedrock managed service** runs the loop
-(`cdk/lib/agent-stack.ts` + `lambda/agent-tools/` + the async proxy in `lambda/api/chat.ts`).
+`bedrock-agentcore:InvokeAgentRuntime` is called once per analyst message; the Strands agent
+(`agent/` — a container, not a Lambda) runs the loop and calls `agent-tools/` for every tool
+(`{ tool, input }` → `{ body }`). `cdk/lib/agent-stack.ts` deploys the Runtime + the agent-tools
+Lambda; the async proxy in `lambda/api/chat.ts` bridges API Gateway's 29s limit.
 
-Constraints that motivate the migration:
+Migrated 2026-09 from **classic Bedrock Agents**, which entered maintenance mode 2026-07-30
+(closed to new customers, model catalog frozen, no EOL announced) and constrained the system
+before that: a 10-functions-per-action-group ceiling, no streaming, session-only memory, and a
+`PrepareAgent`/`configVersion` step on every prompt or schema change. None of that applies now.
 
-- 10 functions per action group (13 tools → split across two groups today)
-- No token streaming to the browser — the worker buffers the full completion, then the client polls
-- Session memory only (30-min TTL); no persistent cross-session analyst memory
-- Every instruction / schema change needs `PrepareAgent` + a manual `configVersion` bump
-- **Classic entered maintenance mode 2026-07-30** — closed to new customers, model catalog frozen
-  at that date, no new features. No end-of-life date announced; existing agents (this account is
-  grandfathered) keep running. Pinned to a pre-freeze model, so nothing is broken today.
-
-### Target — Strands on AgentCore Runtime
-
-The agent loop is the **only** thing that changes. The intent/execution boundary (§2), the
+The agent loop was the **only** thing that changed. The intent/execution boundary (§2), the
 task-queue state machine, the Execution Lambda, the API layer's routes/auth, and both
-`InvokeModel` workers are framework-independent and are not touched.
+`InvokeModel` workers were framework-independent and untouched by the migration.
 
-The full phased plan — change list, IAM diff, effort, and rollback — lives in
-[`agent-migration-plan.md`](agent-migration-plan.md).
+The full history — phased plan, change list, IAM diff, and the create-time bugs hit along the
+way — lives in [`agent-migration-plan.md`](agent-migration-plan.md), kept for reference and as
+the template for the next agent-tier change (Gateway, Memory, or streaming — see that doc's
+Phase 2).
 
 ### AWS pricing reference (verified 2026-09-09)
 

@@ -352,7 +352,7 @@ cd lambda/ato-trigger && npm run build
 cd lambda/ato-worker && npm run build
 
 # Agent container (built by CDK DockerImageAsset on deploy — needs Docker running)
-cd lambda/agent && npm run build   # local typecheck only
+cd agent && npm run build   # local typecheck only
 
 # Frontend (local dev)
 cd frontend && npm run dev

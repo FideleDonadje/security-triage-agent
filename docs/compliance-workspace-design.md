@@ -314,7 +314,7 @@ DENY iam:CreateUser, AttachUserPolicy, PutUserPolicy       → *
 
 ### `security-triage-api` role additions
 
-The existing role already covers DynamoDB on the tasks table and Bedrock InvokeAgent.
+The existing role already covers DynamoDB on the tasks table and `bedrock-agentcore:InvokeAgentRuntime`.
 Two additions for the compliance workspace:
 
 ```
