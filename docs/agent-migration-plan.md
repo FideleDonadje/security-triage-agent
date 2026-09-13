@@ -169,6 +169,14 @@ isolation; real persistence deferred to Phase 2 Memory).
 
 ### Phase 1 leftover — `aws-cdk-lib` bump (standalone task, still open)
 
+**Now also a CI blocker, not just an L1→L2 upgrade (found 2026-09-13):** `npm audit
+--audit-level=high` in `cdk/` fails on `aws-cdk-lib <=2.259.0` —
+[GHSA-vcrf-j523-4mrf](https://github.com/advisories/GHSA-vcrf-j523-4mrf) (OS Command Injection
+in `NodejsFunction` Docker Bundling) plus a CodeBuild S3 log-encryption boolean-inversion
+advisory, and two transitive-only findings (`brace-expansion`, `fast-uri`) bundled inside
+`aws-cdk-lib`'s own dependency tree. The only real fix is the same version bump below — this
+raises its priority but doesn't change the blocker.
+
 **Attempted 2026-09-11, reverted.** Two Windows-specific bundling failures hit in sequence:
 
 1. Fixing `PathNotUnderRoot` with `projectRoot` (repo root) + `depsLockFilePath` (cdk's own
