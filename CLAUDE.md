@@ -7,14 +7,16 @@ It enriches findings with GuardDuty, Config, and CloudTrail context, queues
 remediation tasks for human approval, and executes safe actions autonomously.
 
 Three capabilities:
-- **Triage Agent** — chat-based investigation and remediation (MVP)
-- **ATO Assist** — legacy single-report NIST 800-53 generation (superseded by Compliance Workspace)
+- **Triage Agent** — chat-based investigation and remediation
+- **ATO Assist** — single-report NIST 800-53 generation (quick compliance snapshot; complements Compliance Workspace)
 - **Compliance Workspace** — full NIST RMF 7-step workflow with per-control SSP, POA&M, SAR, RA, ConMon, IRP generation
 
-Full design specs in `docs/`:
+Design specs and operational docs in `docs/`:
 - `docs/triage-agent-design.md`
 - `docs/ato-assist-design.md`
 - `docs/compliance-workspace-design.md`
+- `docs/architecture.md` — cloud-agnostic architecture reference
+- `docs/runbook.md` — operational runbook (resources, deploy, troubleshooting)
 
 ---
 
@@ -63,15 +65,23 @@ Full design specs in `docs/`:
 - Node.js Lambda (Express-style) — thin API layer only, no agent logic
 - Validates Cognito JWT on every request
 - Chat uses async pattern: POST /chat → 202 + request_id → GET /chat/result/:id (polls until done)
-- Lambda invokes itself asynchronously to work around API Gateway's 29s timeout
+- Lambda invokes itself asynchronously (worker calls AgentCore `InvokeAgentRuntime`) to work
+  around API Gateway's 29s timeout
 - Handles task queue CRUD against DynamoDB (approve, reject, dismiss via DELETE)
 - Task write actions are separate from Execution Lambda trigger (stream-based)
 
 ### Agent
-- AWS Bedrock AgentCore — owns the agent loop, memory, tool execution
-- Claude Sonnet on Bedrock (cross-region inference profile)
-- Read-only AWS access (Security Hub, GuardDuty, Config, CloudTrail, IAM, Cost Explorer, Access Analyzer)
-- Write access to DynamoDB only (queue_task and cancel_task tools)
+- Strands Agents SDK (TypeScript) app in `agent/` (top-level — it's a container, not a Lambda),
+  hosted on Amazon Bedrock AgentCore Runtime (migrated 2026-09 from classic Bedrock Agents —
+  see `docs/agent-migration-plan.md`)
+- Container: `agent/Dockerfile` (node:22-slim, linux/arm64), exposes `/ping` + `/invocations`
+- Claude Sonnet on Bedrock (cross-region inference profile) via `strands.BedrockModel`
+- System prompt + 13 tool definitions live in `agent/src/` (prompt.ts, tools.ts)
+- Tools are thin proxies: each forwards `{ tool, input }` to the `agent-tools` Lambda (its own
+  restricted role — read-only AWS + DynamoDB PutItem/UpdateItem). The Runtime execution role can
+  only InvokeModel, pull its image, and invoke that one Lambda.
+- Runtime ARN published to SSM `/security-triage/agent-runtime-arn`; API Lambda calls it with
+  `bedrock-agentcore:InvokeAgentRuntime`
 - NEVER executes AWS actions directly
 
 ### Execution Lambda
@@ -101,13 +111,16 @@ Full design specs in `docs/`:
   Stage B calls Bedrock per-family (chunked at 18 controls) with official NIST titles + SecurityHub status + CRM context
 - Baseline control lists sourced from official NIST SP 800-53B (207/345/428 for Low/Moderate/High)
 - AWS responsibility assignments from `aws-crm.ts` (based on AWS FedRAMP High P-ATO)
+- **POA&M output shape:** `{ controlFamilies: [{ family, poamEntries: [...] }], summary, generatedAt }` —
+  entries are nested per family, not at the top level. DocumentViewer and Excel export flatten via
+  `controlFamilies[*].poamEntries`. Do not change to a flat top-level array without updating both.
 - Writes JSON to S3, marks record COMPLETED; on failure marks FAILED
 - DLQ (SQS) catches repeated failures; `compliance-repair` Lambda recovers stuck jobs
 
 ### Compliance Repair Lambda
 
 - Triggered on a schedule (EventBridge, every 5 minutes)
-- Scans `security-triage-systems` for records stuck IN_PROGRESS > 12 minutes → marks FAILED
+- Scans `security-triage-systems` for records stuck IN_PROGRESS > 16 minutes → marks FAILED
 - Redrives DLQ messages for transient failures (up to 3 retries)
 
 ### Data
@@ -233,56 +246,80 @@ All outputs written by CDK at deploy time. No manual env vars or cdk-outputs.jso
 /security-triage/user-pool-client-id
 /security-triage/api-url
 /security-triage/cognito-domain
-/security-triage/agent-id
-/security-triage/agent-alias-id
+/security-triage/agent-runtime-arn
 /security-triage/required-tag-keys
 ```
 
 ---
 
-## Project structure (target)
+## Project structure
 
 ```
 /
 ├── CLAUDE.md
+├── LICENSE
 ├── docs/
-│   ├── triage-agent-design.md     ← full triage agent design spec
-│   └── ato-assist-design.md       ← full ATO assist design spec
+│   ├── triage-agent-design.md
+│   ├── ato-assist-design.md
+│   ├── compliance-workspace-design.md
+│   ├── architecture.md            ← cloud-agnostic architecture reference
+│   └── runbook.md                 ← operational runbook (resources, deploy, troubleshooting)
 ├── cdk/
 │   ├── bin/app.ts
 │   ├── lib/
 │   │   ├── security-triage-stack.ts   ← Cognito, DynamoDB, API Lambda, Execution Lambda, API GW, WAF
-│   │   ├── agent-stack.ts             ← Bedrock Agent, Agent Tools Lambda
+│   │   ├── agent-stack.ts             ← AgentCore Runtime (Strands agent container) + agent-tools Lambda
+│   │   ├── compliance-stack.ts        ← systems table, compliance worker + repair Lambdas, S3, SQS DLQ, EventBridge
 │   │   └── frontend-stack.ts          ← S3 + CloudFront
 │   └── package.json
+├── agent/                      ← Strands agent — a container (runs on AgentCore Runtime), not a
+│   │                              Lambda, so it lives outside lambda/
+│   ├── Dockerfile               ← node:22-slim, linux/arm64, /ping + /invocations
+│   └── src/                     ← index.ts (Express), agent.ts, prompt.ts, tools.ts (13 proxy tools)
 ├── lambda/
-│   ├── api/                    ← Node.js API layer (triage chat + task queue)
-│   │   ├── index.ts
-│   │   ├── auth.ts
-│   │   ├── chat.ts
-│   │   └── tasks.ts
+│   ├── api/                    ← Node.js API layer
+│   │   ├── index.ts            ← handler entry point + CORS
+│   │   ├── auth.ts             ← Cognito JWT validation
+│   │   ├── chat.ts             ← async AgentCore proxy
+│   │   ├── tasks.ts            ← task queue CRUD
+│   │   └── compliance.ts       ← compliance workspace routes (systems, documents, FIPS 199)
 │   ├── execution/              ← Execution Lambda (enable_s3_logging, tag_resource)
 │   │   ├── index.ts
 │   │   ├── enable-logging.ts
 │   │   └── apply-tags.ts
-│   ├── agent-tools/            ← Bedrock action group (all agent tools)
-│   │   └── index.ts
-│   ├── agent-prepare/          ← Custom Resource Lambda (PrepareAgent on deploy)
+│   ├── agent-tools/            ← agent tool executor — invoked by the Strands agent with { tool, input }
 │   │   └── index.ts
 │   ├── ato-trigger/            ← ATO API handler (create job, poll status)
 │   │   └── index.ts
-│   └── ato-worker/             ← ATO background processor (SecurityHub → Bedrock → S3)
+│   ├── ato-worker/             ← ATO background processor (SecurityHub → Bedrock → S3)
+│   │   └── index.ts
+│   ├── compliance-worker/      ← Compliance document generator (SSP, POA&M, SAR, RA, ConMon, IRP)
+│   │   ├── index.ts
+│   │   ├── nist-catalog.ts     ← official SP 800-53B baseline lists + control titles
+│   │   └── aws-crm.ts          ← AWS FedRAMP CRM responsibility assignments
+│   └── compliance-repair/      ← Stuck-job detector + DLQ redrive (runs every 5 min)
 │       └── index.ts
 ├── frontend/
 │   ├── src/
-│   │   ├── App.tsx
+│   │   ├── App.tsx             ← shell: header, theme toggle, tab nav
 │   │   ├── components/
+│   │   │   ├── TriageView.tsx
 │   │   │   ├── Chat.tsx
-│   │   │   ├── TaskQueue.tsx
-│   │   │   └── AtoAssist.tsx
+│   │   │   ├── TaskQueue.tsx   ← task queue with Show IDs / Hide IDs account masking
+│   │   │   ├── AgentDrawer.tsx
+│   │   │   ├── AtoAssist.tsx
+│   │   │   ├── ComplianceWorkspace.tsx
+│   │   │   ├── RmfView.tsx     ← NIST RMF 7-step workflow UI
+│   │   │   ├── DocumentCard.tsx
+│   │   │   ├── DocumentViewer.tsx  ← SSP/POA&M/SAR/RA/ConMon/IRP renderer + Excel export
+│   │   │   ├── Fips199Card.tsx
+│   │   │   └── SettingsView.tsx
 │   │   └── lib/
 │   │       ├── auth.ts
-│   │       └── api.ts
+│   │       ├── api.ts
+│   │       ├── compliance-api.ts
+│   │       ├── config.ts
+│   │       └── export.ts       ← SheetJS POAM + SSP Excel export
 │   └── package.json
 ├── deploy.sh                   ← full deploy: CDK (two-pass) + frontend
 ├── deploy-frontend.sh          ← frontend-only redeploy (reads config from SSM)
@@ -313,6 +350,9 @@ cd lambda/execution && npm run build
 cd lambda/agent-tools && npm run build
 cd lambda/ato-trigger && npm run build
 cd lambda/ato-worker && npm run build
+
+# Agent container (built by CDK DockerImageAsset on deploy — needs Docker running)
+cd agent && npm run build   # local typecheck only
 
 # Frontend (local dev)
 cd frontend && npm run dev

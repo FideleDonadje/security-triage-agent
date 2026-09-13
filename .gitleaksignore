@@ -1,0 +1,59 @@
+# Gitleaks fingerprint allowlist.
+# cdk/cdk.out/ is in .gitignore -- git-mode scans skip it going forward.
+#
+# The 45 entries below are all false positives: commit 741c390 (2026-05-08,
+# before this repo's docs/agent-migration-plan.md work) accidentally committed
+# gitleaks-results.json -- a scan OUTPUT file whose own content quotes S3
+# asset-zip hashes (e.g. "726c78e2...zip") that gitleaks' generic-api-key
+# rule flags by entropy. The file was deleted from the tree in commit 1a09cb2
+# (2026-09-11, see docs -- scan output should never be version-controlled),
+# but git-history scans still see it in the 741c390 blob. Rewriting history
+# to purge the blob would force-push and rewrite every downstream commit hash,
+# so these fingerprints are allowlisted instead -- the safe, non-destructive
+# fix for a finding that only ever existed in a JSON report about findings.
+
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:10
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:110
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:130
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:150
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:170
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:190
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:210
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:230
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:250
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:270
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:290
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:30
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:310
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:330
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:350
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:370
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:390
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:409
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:410
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:429
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:430
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:450
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:470
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:490
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:50
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:510
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:530
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:550
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:570
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:590
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:610
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:630
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:649
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:650
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:669
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:670
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:690
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:70
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:710
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:730
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:750
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:770
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:790
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:810
+741c390943f613dda27cf30e6e3d7d078a8e5f1a:gitleaks-results.json:generic-api-key:90

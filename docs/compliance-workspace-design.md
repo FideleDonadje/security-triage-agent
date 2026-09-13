@@ -223,11 +223,10 @@ GET    /systems/:id/documents/:type              → status + presigned URL if C
 - `security-triage-execution` — triage remediation, untouched
 - `security-triage-ato-trigger` — stays running, not extended, eventually deprecated
 - `security-triage-ato-worker` — stays running, not extended, eventually deprecated
-- `security-triage-agent-prepare`
 
 ### CDK deploy-time
 
-Custom Resource Lambda writes the `SYSTEM#default / METADATA` record at deploy time with values from CDK context (system name, owner, account, region). Reuses the pattern of `agent-prepare`.
+Custom Resource Lambda writes the `SYSTEM#default / METADATA` record at deploy time with values from CDK context (system name, owner, account, region).
 
 ---
 
@@ -315,7 +314,7 @@ DENY iam:CreateUser, AttachUserPolicy, PutUserPolicy       → *
 
 ### `security-triage-api` role additions
 
-The existing role already covers DynamoDB on the tasks table and Bedrock InvokeAgent.
+The existing role already covers DynamoDB on the tasks table and `bedrock-agentcore:InvokeAgentRuntime`.
 Two additions for the compliance workspace:
 
 ```

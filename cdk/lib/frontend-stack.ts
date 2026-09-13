@@ -60,6 +60,12 @@ export class FrontendStack extends cdk.Stack {
       versioned: false,  // static SPA — sync --delete replaces all files, old versions add cost
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
+    (this.frontendBucket.node.defaultChild as s3.CfnBucket).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_18', comment: 'Access logging not required for static SPA hosting bucket' },
+        { id: 'CKV_AWS_21', comment: 'Versioning disabled intentionally — sync --delete replaces all files, old versions add cost' },
+      ],
+    });
 
     // ── CloudFront Distribution ────────────────────────────────────────────
     // S3BucketOrigin.withOriginAccessControl automatically creates the OAC
@@ -92,6 +98,13 @@ export class FrontendStack extends cdk.Stack {
           responsePagePath: '/index.html',
           ttl: cdk.Duration.seconds(0),
         },
+      ],
+    });
+    (this.distribution.node.defaultChild as cloudfront.CfnDistribution).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_68', comment: 'WAF for CloudFront deferred to prod tier; must be deployed to us-east-1' },
+        { id: 'CKV_AWS_86', comment: 'CloudFront access logging deferred to prod tier' },
+        { id: 'CKV_AWS_174', comment: 'Default CloudFront certificate enforces TLS 1.2 natively; MinimumProtocolVersion is not settable alongside CloudFrontDefaultCertificate' },
       ],
     });
 

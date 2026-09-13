@@ -1,6 +1,7 @@
 # lambda/agent-tools/
 
-Bedrock Agent action group Lambda — executes every tool the agent can call.
+Agent tool executor — invoked by the Strands agent (`../../agent/`, running on AgentCore
+Runtime) with `{ tool, input }`. Executes every tool the agent can call.
 
 ## Tools
 

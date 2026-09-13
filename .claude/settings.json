@@ -6,7 +6,18 @@
       "Bash(curl -sL -o \"d:/Projects/security-triage-agent/lambda/compliance-worker/sp800-53r5-controls.xlsx\" \"https://csrc.nist.gov/files/pubs/sp/800/53/r5/upd1/final/docs/sp800-53r5-controls.xlsx\")",
       "Bash(grep -n \"'\\\\\\\\*'\" /d/Projects/security-triage-agent/cdk/lib/*.ts)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(curl -s https://raw.githubusercontent.com/FideleDonadje/security-triage-agent/main/README.md)"
+      "Bash(curl -s https://raw.githubusercontent.com/FideleDonadje/security-triage-agent/main/README.md)",
+      "PowerShell(gitleaks detect --source . --report-format sarif --report-path gitleaks.sarif 2>&1; Write-Host \"Exit: $LASTEXITCODE\")",
+      "PowerShell(semgrep --version 2>&1; Write-Host \"semgrep exit: $LASTEXITCODE\")",
+      "PowerShell(aws configure list-profiles 2>&1)",
+      "PowerShell(checkov --version 2>&1; Write-Host \"checkov exit: $LASTEXITCODE\")",
+      "PowerShell(python --version 2>&1)",
+      "PowerShell(pip --version 2>&1)",
+      "PowerShell(python -m checkov --version 2>&1)",
+      "PowerShell($env:PATH += \";$env:APPDATA\\\\Python\\\\Python313\\\\Scripts\"; cd \"d:\\\\Projects\\\\security-triage-agent\"; checkov -d cdk/cdk.out --framework cloudformation --quiet 2>&1)",
+      "PowerShell(Get-ChildItem \"$env:LOCALAPPDATA\\\\Microsoft\\\\WinGet\\\\Packages\" | Select-Object Name)",
+      "PowerShell(Test-Path \"$env:LOCALAPPDATA\\\\Microsoft\\\\WinGet\\\\Packages\")",
+      "PowerShell(cmd /c \"dir /b /s `\"$env:LOCALAPPDATA\\\\Microsoft\\\\WinGet\\\\Packages`\"\")"
     ]
   },
   "hooks": {

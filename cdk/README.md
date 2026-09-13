@@ -7,7 +7,7 @@ AWS CDK v2 infrastructure — deploys all four stacks.
 | File | Stack | What it creates |
 | --- | --- | --- |
 | `lib/security-triage-stack.ts` | `SecurityTriageStack` | Cognito, DynamoDB task table + ATO jobs table, API Lambda, Execution Lambda, ATO Trigger Lambda, ATO Worker Lambda, API Gateway, WAF, S3 buckets (access logs + ATO reports) |
-| `lib/agent-stack.ts` | `SecurityTriageAgentStack` | Bedrock Agent, action group Lambda, IAM roles, SSM parameters, auto-prepare custom resource |
+| `lib/agent-stack.ts` | `SecurityTriageAgentStack` | AgentCore Runtime (Strands agent container, from `../agent/`), agent-tools Lambda, IAM roles, SSM parameters |
 | `lib/compliance-stack.ts` | `SecurityTriageComplianceStack` | DynamoDB systems table, Compliance Worker Lambda, Compliance Repair Lambda, SQS DLQ, S3 compliance docs bucket, EventBridge rule (every 5 min) |
 | `lib/frontend-stack.ts` | `SecurityTriageFrontendStack` | S3 bucket, CloudFront distribution |
 
@@ -64,4 +64,7 @@ All outputs are also written to SSM Parameter Store so `deploy-frontend.sh` can 
 
 ## Changing the agent
 
-After modifying `lib/agent-stack.ts` (system prompt, tools, IAM), bump `configVersion` in the `AgentPrepareResource` custom resource — this triggers a `PrepareAgent` call on the next deploy.
+The system prompt and tool definitions live in `../agent/src/` (`prompt.ts`, `tools.ts`), not in
+`lib/agent-stack.ts`. Editing them is a normal code change — `agent-stack.ts` rebuilds the
+container from that directory on every deploy (needs Docker running). No console step, no
+manual "prepare" call. See `docs/agent-migration-plan.md` for background on the agent tier.

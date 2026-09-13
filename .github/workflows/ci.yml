@@ -11,13 +11,18 @@
 #   This role must trust the GitHub OIDC provider for this specific repo.
  
 name: CI
- 
+
 on:
   push:
     branches:
       - main
   pull_request:
- 
+
+permissions:
+  contents: read
+  security-events: write
+  id-token: write
+
 jobs:
   security-gate:
     uses: FideleDonadje/shared-workflows/.github/workflows/security-scan.yml@main

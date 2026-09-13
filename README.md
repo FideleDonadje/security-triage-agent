@@ -75,6 +75,14 @@ In a multi-account environment, Security Hub's aggregated view means the agent w
 
 ![RMF documents ready](docs/screenshots/compliance-workspace-expanded-2.png)
 
+**SSP document viewer — system overview, authorization boundary, and 345-control status bar (67 Implemented / 237 Partial / 40 Inherited):**
+
+![SSP overview](docs/screenshots/compliance-workspace-SSP-overview.png)
+
+**SSP control narratives — per-control implementation statement, responsible entities, testing evidence, and CRM responsibility assignment:**
+
+![SSP control narratives](docs/screenshots/compliance-workspace-control-narrative.png)
+
 **ATO Report Generator — NIST SP 800-53 Rev 5: 1,831 findings, 68% pass rate, AC family with POA&M entries:**
 
 ![ATO Assist dashboard](docs/screenshots/ATO-Assist-dashbord.png)
@@ -192,9 +200,9 @@ flowchart TB
 
 ---
 
-## MVP scope
+## Triage Agent scope
 
-**In scope**
+**Implemented**
 - Single analyst workflow
 - Chat UI + Task Queue panel (two-panel layout)
 - Agent investigates Security Hub findings on demand
@@ -202,8 +210,9 @@ flowchart TB
 - Two autonomous actions: enable S3 access logging, apply required resource tags (Environment / Owner / Project)
 - Compliance posture reports against any enabled Security Hub standard (NIST 800-53, CIS, FSBP, PCI DSS)
 - Task management: analyst can approve, reject, or dismiss tasks; agent can cancel its own queued tasks
+- Account IDs masked by default in the task queue (Show IDs toggle to reveal)
 
-**Out of scope (post-MVP)**
+**Not implemented**
 - Multi-user / role-based approval
 - Email / Slack notifications
 - Auto-approval or scheduled monitoring
@@ -219,21 +228,23 @@ flowchart TB
 │   ├── bin/app.ts                # CDK app entry point — instantiates all stacks
 │   └── lib/
 │       ├── security-triage-stack.ts  # Core: Cognito, DynamoDB, Lambdas, API GW, WAF, S3
-│       ├── agent-stack.ts            # Bedrock AgentCore IAM role + auto-prepare resource
+│       ├── agent-stack.ts            # Strands agent on AgentCore Runtime + agent-tools Lambda
 │       ├── compliance-stack.ts       # Compliance Workspace: systems table, worker + repair Lambdas, S3, SQS DLQ, EventBridge
 │       └── frontend-stack.ts         # S3 + CloudFront for React SPA
+├── agent/                        # Strands agent — a container (runs on AgentCore Runtime),
+│   │                                not a Lambda, so it lives outside lambda/
+│   ├── Dockerfile                # node:22-slim, linux/arm64, /ping + /invocations
+│   └── src/                      # index.ts (Express), agent.ts, prompt.ts, tools.ts
 ├── lambda/
 │   ├── api/                      # Node.js API layer
 │   │   ├── index.ts              # Handler entry point + CORS
 │   │   ├── auth.ts               # Cognito JWT validation
-│   │   ├── chat.ts               # Async Bedrock AgentCore proxy (POST→202, GET poll)
+│   │   ├── chat.ts               # Async AgentCore Runtime proxy (POST→202, GET poll)
 │   │   └── tasks.ts              # Task queue CRUD + compliance workspace routes
-│   ├── agent-tools/              # Bedrock action group handler
+│   ├── agent-tools/              # Agent tool executor (invoked by the Strands agent)
 │   │   └── index.ts              # get_findings, get_threat_context, get_tag_compliance,
 │   │                             #   get_enabled_standards, get_compliance_report,
 │   │                             #   queue_task, cancel_task, get_task_queue, etc.
-│   ├── agent-prepare/            # CDK custom resource — prepares agent after deploy
-│   │   └── index.ts
 │   ├── execution/                # Execution Lambda — Tier 1 remediation actions
 │   │   ├── index.ts              # Handler + DynamoDB stream parser
 │   │   ├── enable-logging.ts     # S3 PutBucketLogging
@@ -242,10 +253,12 @@ flowchart TB
 │   │   └── index.ts              # /ato/standards, /ato/generate, /ato/status, /ato/jobs
 │   ├── ato-worker/               # ATO Assist background processor
 │   │   └── index.ts              # Security Hub → group by NIST family → Bedrock → S3
-│   └── compliance-worker/        # Compliance Workspace document generator
+│   ├── compliance-worker/        # Compliance Workspace document generator
 │       ├── index.ts              # Stream handler → dispatches to SSP/POA&M/SAR/RA/ConMon/IRP generators
 │       ├── nist-catalog.ts       # Official NIST SP 800-53B baseline lists + SP 800-53r5 titles (207/345/428)
 │       └── aws-crm.ts            # AWS FedRAMP High CRM: PE/MA inherited, SC/CM/CP shared responsibility
+│   └── compliance-repair/        # Stuck-job detector + DLQ redrive (EventBridge, every 5 min)
+│       └── index.ts
 ├── frontend/                     # React + Vite SPA
 │   ├── src/
 │   │   ├── App.tsx               # Shell: header with avatar dropdown + tab nav
@@ -369,7 +382,7 @@ This single script handles everything:
 >   `cdk deploy -c cognitoDomainPrefix=my-custom-prefix`
 > - Cognito callback URLs (CloudFront + localhost for local dev)
 > - `ALLOWED_ORIGIN` on the API Lambda (set to the CloudFront URL)
-> - Bedrock Agent ID and alias ID written to SSM — API Lambda reads them at cold start
+> - AgentCore Runtime ARN written to SSM — API Lambda reads it at cold start
 
 ### Step 2 — Run the two commands printed by the script
 

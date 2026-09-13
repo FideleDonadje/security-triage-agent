@@ -44,22 +44,34 @@ const VALID_DOC_TYPES = new Set(['POAM', 'SSP', 'SAR', 'RA', 'CONMON', 'IRP']);
 const IMPACT_RANK: Record<string, number> = { Low: 0, Moderate: 1, High: 2 };
 const IMPACT_LEVELS = ['Low', 'Moderate', 'High'];
 
-// ── GET /systems/:systemId ─────────────────────────────────────────────────────
-
-export async function handleGetSystem(
-  event: APIGatewayProxyEvent,
-  _auth: AuthContext,
-): Promise<APIGatewayProxyResult> {
-  const systemId = event.pathParameters?.systemId;
-  if (!systemId) return err(400, 'systemId is required');
-
+// ── Ownership check ────────────────────────────────────────────────────────────
+// Fetches the system METADATA record and verifies the caller owns it.
+// Returns the item on success, or an error response to return immediately.
+async function assertOwnership(
+  systemId: string,
+  auth: AuthContext,
+): Promise<{ item: Record<string, unknown> } | APIGatewayProxyResult> {
   const result = await ddb.send(new GetCommand({
     TableName: SYSTEMS_TABLE,
     Key: { pk: `SYSTEM#${systemId}`, sk: 'METADATA' },
   }));
-
   if (!result.Item) return err(404, 'System not found');
-  return ok(result.Item);
+  if (result.Item['ownerEmail'] !== auth.email) return err(403, 'Access denied');
+  return { item: result.Item as Record<string, unknown> };
+}
+
+// ── GET /systems/:systemId ─────────────────────────────────────────────────────
+
+export async function handleGetSystem(
+  event: APIGatewayProxyEvent,
+  auth: AuthContext,
+): Promise<APIGatewayProxyResult> {
+  const systemId = event.pathParameters?.systemId;
+  if (!systemId) return err(400, 'systemId is required');
+
+  const check = await assertOwnership(systemId, auth);
+  if (!('item' in check)) return check;
+  return ok(check.item);
 }
 
 // ── PUT /systems/:systemId/settings ───────────────────────────────────────────
@@ -70,6 +82,9 @@ export async function handleUpdateSettings(
 ): Promise<APIGatewayProxyResult> {
   const systemId = event.pathParameters?.systemId;
   if (!systemId) return err(400, 'systemId is required');
+
+  const check = await assertOwnership(systemId, auth);
+  if (!('item' in check)) return check;
 
   let body: Record<string, string>;
   try {
@@ -107,10 +122,13 @@ export async function handleUpdateSettings(
 
 export async function handleListDocuments(
   event: APIGatewayProxyEvent,
-  _auth: AuthContext,
+  auth: AuthContext,
 ): Promise<APIGatewayProxyResult> {
   const systemId = event.pathParameters?.systemId;
   if (!systemId) return err(400, 'systemId is required');
+
+  const check = await assertOwnership(systemId, auth);
+  if (!('item' in check)) return check;
 
   const result = await ddb.send(new QueryCommand({
     TableName:                 SYSTEMS_TABLE,
@@ -130,6 +148,9 @@ export async function handleSaveFips199(
 ): Promise<APIGatewayProxyResult> {
   const systemId = event.pathParameters?.systemId;
   if (!systemId) return err(400, 'systemId is required');
+
+  const check = await assertOwnership(systemId, auth);
+  if (!('item' in check)) return check;
 
   let body: { confidentiality?: string; integrity?: string; availability?: string };
   try {
@@ -178,6 +199,9 @@ export async function handleGenerateDocument(
   if (!systemId) return err(400, 'systemId is required');
   if (!docType || !VALID_DOC_TYPES.has(docType)) return err(400, `docType must be one of: ${[...VALID_DOC_TYPES].join(', ')}`);
 
+  const check = await assertOwnership(systemId, auth);
+  if (!('item' in check)) return check;
+
   const generationId = randomUUID();
   const pk = `SYSTEM#${systemId}`;
   const sk = `DOC#NIST#${docType}`;
@@ -216,13 +240,16 @@ export async function handleGenerateDocument(
 
 export async function handleGetDocument(
   event: APIGatewayProxyEvent,
-  _auth: AuthContext,
+  auth: AuthContext,
 ): Promise<APIGatewayProxyResult> {
   const systemId = event.pathParameters?.systemId;
   const docType  = event.pathParameters?.docType?.toUpperCase();
 
   if (!systemId) return err(400, 'systemId is required');
   if (!docType) return err(400, 'docType is required');
+
+  const check = await assertOwnership(systemId, auth);
+  if (!('item' in check)) return check;
 
   const pk = `SYSTEM#${systemId}`;
   const sk = `DOC#NIST#${docType}`;

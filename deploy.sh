@@ -75,7 +75,7 @@ echo "==> CDK template verified (TypeScript build passed above)."
 
 echo ""
 echo "==> Building Lambda packages..."
-for pkg in api execution agent-tools agent-prepare ato-trigger ato-worker compliance-worker compliance-repair; do
+for pkg in api execution agent-tools ato-trigger ato-worker compliance-worker compliance-repair; do
   echo "    lambda/$pkg"
   (cd "lambda/$pkg" && npm install --silent && npm run build --silent)
 done
@@ -91,7 +91,7 @@ echo ""
 echo "==> Pass 1: deploying FrontendStack..."
 # shellcheck disable=SC2086
 (cd cdk && cdk deploy SecurityTriageFrontendStack \
-  $PROFILE_ARG --require-approval never --no-notices)
+  $PROFILE_ARG --require-approval never --no-notices --asset-parallelism false)
 
 echo "==> Reading CloudFront URL from SSM..."
 echo "    Region  : $REGION"
@@ -122,13 +122,17 @@ fi
 echo "    CloudFront URL: $CLOUDFRONT_URL"
 
 # ── Step 4: Pass 2 — deploy core + agent with the real CloudFront URL ─────────
+# --asset-parallelism false: this pass bundles several NodejsFunction Lambdas at once.
+# A known CDK race (github.com/aws/aws-cdk#25711) can rename/delete a shared
+# bundling-temp-<hash> dir out from under a concurrent bundle, which POSIX tolerates
+# but Windows surfaces as EPERM. Serializing bundling avoids it; costs a few seconds.
 echo ""
 echo "==> Pass 2: deploying SecurityTriageStack + AgentStack..."
 # shellcheck disable=SC2086
 (cd cdk && cdk deploy SecurityTriageStack SecurityTriageAgentStack SecurityTriageComplianceStack \
   $PROFILE_ARG \
   --context frontendUrl="$CLOUDFRONT_URL" \
-  --require-approval never --no-notices \
+  --require-approval never --no-notices --asset-parallelism false \
   --outputs-file ../cdk-outputs.json)
 
 # ── Step 5: Build and deploy the frontend ────────────────────────────────────

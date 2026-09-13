@@ -48,12 +48,12 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNode from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
-import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
-import { SSM_AGENT_ID, SSM_AGENT_ALIAS, SSM_REQUIRED_TAG_KEYS } from './agent-stack';
+import { SSM_AGENT_RUNTIME_ARN, SSM_REQUIRED_TAG_KEYS } from './agent-stack';
 import { Construct } from 'constructs';
+import { STANDARD_BUNDLING, createLogGroup } from './lambda-defaults';
 
 // SSM parameter paths — referenced by CI/CD pipelines and sibling stacks
 export const SSM_USER_POOL_ID        = '/security-triage/user-pool-id';
@@ -168,6 +168,13 @@ export class SecurityTriageStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    (this.taskTable.node.defaultChild as dynamodb.CfnTable).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_119', comment: 'AWS managed encryption acceptable for dev tier' },
+        { id: 'CKV_AWS_28', comment: 'Point-in-time recovery enabled in prod; deferred for dev tier' },
+      ],
+    });
+
     // GSI: list tasks by status (get all PENDING / APPROVED)
     this.taskTable.addGlobalSecondaryIndex({
       indexName: 'status-index',
@@ -191,6 +198,13 @@ export class SecurityTriageStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    (accessLogsBucket.node.defaultChild as s3.CfnBucket).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_18', comment: 'Access logging not enabled on the logging destination bucket itself' },
+        { id: 'CKV_AWS_21', comment: 'Versioning not required for S3 access logs; lifecycle rule handles expiration' },
+      ],
+    });
+
     // Allow the S3 logging service to write access logs from any bucket in this account
     accessLogsBucket.addToResourcePolicy(
       new iam.PolicyStatement({
@@ -206,24 +220,15 @@ export class SecurityTriageStack extends cdk.Stack {
     );
 
     // ── CloudWatch Log Groups (90-day retention) ───────────────────────────
-    const apiGwLogGroup = new logs.LogGroup(this, 'ApiGatewayLogs', {
-      logGroupName: '/security-triage/api-gateway',
-      retention: logs.RetentionDays.THREE_MONTHS,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
+    const apiGwLogGroup = createLogGroup(this, 'ApiGatewayLogs', '/security-triage/api-gateway');
 
     // Lambda log groups — pre-created so retention is managed by CDK, not Lambda
-    const apiLambdaLogGroup = new logs.LogGroup(this, 'ApiLambdaLogs', {
-      logGroupName: '/aws/lambda/security-triage-api',
-      retention: logs.RetentionDays.THREE_MONTHS,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
-
-    const executionLambdaLogGroup = new logs.LogGroup(this, 'ExecutionLambdaLogs', {
-      logGroupName: '/aws/lambda/security-triage-execution',
-      retention: logs.RetentionDays.THREE_MONTHS,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
+    const apiLambdaLogGroup = createLogGroup(
+      this, 'ApiLambdaLogs', '/aws/lambda/security-triage-api',
+    );
+    const executionLambdaLogGroup = createLogGroup(
+      this, 'ExecutionLambdaLogs', '/aws/lambda/security-triage-execution',
+    );
 
     // ── IAM: Execution Lambda Role ─────────────────────────────────────────
     // ARCHITECTURE RULE: this is the ONLY role that writes to AWS resources
@@ -337,35 +342,31 @@ export class SecurityTriageStack extends cdk.Stack {
       ],
     }));
 
-    // Bedrock: invoke AgentCore agent — ARN pattern updated post-deploy
+    // AgentCore Runtime: invoke the Strands agent (any runtime in this account)
     apiLambdaRole.addToPolicy(new iam.PolicyStatement({
       sid: 'BedrockAgentCoreInvoke',
       effect: iam.Effect.ALLOW,
-      actions: [
-        'bedrock:InvokeAgent',
-        'bedrock:InvokeAgentWithResponseStream',
-      ],
+      actions: ['bedrock-agentcore:InvokeAgentRuntime'],
       resources: [
-        `arn:aws:bedrock:${this.region}:${this.account}:agent/*`,
-        `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/*/*`,
+        `arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`,
+        `arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*/runtime-endpoint/*`,
       ],
     }));
 
-    // SSM: read agent ID and alias ID written by AgentStack after deploy
+    // SSM: read the AgentCore Runtime ARN written by AgentStack after deploy
     apiLambdaRole.addToPolicy(new iam.PolicyStatement({
       sid: 'SsmReadAgentConfig',
       effect: iam.Effect.ALLOW,
       actions: ['ssm:GetParameter'],
       resources: [
-        `arn:aws:ssm:${this.region}:${this.account}:parameter${SSM_AGENT_ID}`,
-        `arn:aws:ssm:${this.region}:${this.account}:parameter${SSM_AGENT_ALIAS}`,
+        `arn:aws:ssm:${this.region}:${this.account}:parameter${SSM_AGENT_RUNTIME_ARN}`,
       ],
     }));
 
     // ── Lambda: API Layer (NodejsFunction — esbuild bundles TS) ───────────
     this.apiLambda = new lambdaNode.NodejsFunction(this, 'ApiLambda', {
       functionName: 'security-triage-api',
-      description: 'REST API handler: validates Cognito JWT, proxies chat to Bedrock Agent, manages task queue CRUD in DynamoDB',
+      description: 'REST API handler: validates Cognito JWT, proxies chat to the AgentCore Runtime, manages task queue CRUD in DynamoDB',
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
       entry: path.join(__dirname, '../../lambda/api/index.ts'),
@@ -376,25 +377,29 @@ export class SecurityTriageStack extends cdk.Stack {
       timeout: cdk.Duration.minutes(5),
       memorySize: 512,
       logGroup: apiLambdaLogGroup,
-      bundling: {
-        minify: true,
-        sourceMap: true,
-        externalModules: [],            // bundle everything; Lambda has no deps
-      },
+      bundling: STANDARD_BUNDLING,       // bundle everything; Lambda has no deps
       environment: {
         TABLE_NAME: this.taskTable.tableName,
         STATUS_INDEX_NAME: 'status-index',
         USER_POOL_ID: this.userPool.userPoolId,
         USER_POOL_CLIENT_ID: this.userPoolClient.userPoolClientId,
         REGION: this.region,
-        // Agent IDs are written to SSM by AgentStack and read at Lambda cold start
-        AGENT_ID_PARAM: SSM_AGENT_ID,
-        AGENT_ALIAS_ID_PARAM: SSM_AGENT_ALIAS,
+        // AgentCore Runtime ARN is written to SSM by AgentStack, read at cold start
+        AGENT_RUNTIME_ARN_PARAM: SSM_AGENT_RUNTIME_ARN,
         // CORS: restrict to CloudFront URL; falls back to * for local dev
         ALLOWED_ORIGIN: frontendUrl ?? '*',
         // Used by handleChat to invoke itself asynchronously
         FUNCTION_NAME: 'security-triage-api',
       },
+    });
+
+    (this.apiLambda.node.defaultChild as lambda.CfnFunction).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_117', comment: 'Lambda VPC placement not required for dev tier' },
+        { id: 'CKV_AWS_116', comment: 'DLQ not required for dev tier' },
+        { id: 'CKV_AWS_115', comment: 'Reserved concurrency not required for dev tier' },
+        { id: 'CKV_AWS_173', comment: 'Secrets in Secrets Manager not env vars' },
+      ],
     });
 
     // Allow the API Lambda to invoke itself asynchronously for long-running Bedrock calls
@@ -417,17 +422,22 @@ export class SecurityTriageStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(60),
       memorySize: 256,
       logGroup: executionLambdaLogGroup,
-      bundling: {
-        minify: true,
-        sourceMap: true,
-        externalModules: [],
-      },
+      bundling: STANDARD_BUNDLING,
       environment: {
         TABLE_NAME: this.taskTable.tableName,
         LOGGING_BUCKET: accessLogsBucket.bucketName,
         REGION: this.region,
         REQUIRED_TAG_KEYS_PARAM: SSM_REQUIRED_TAG_KEYS,
       },
+    });
+
+    (executionLambda.node.defaultChild as lambda.CfnFunction).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_117', comment: 'Lambda VPC placement not required for dev tier' },
+        { id: 'CKV_AWS_116', comment: 'DLQ not required for dev tier' },
+        { id: 'CKV_AWS_115', comment: 'Reserved concurrency not required for dev tier' },
+        { id: 'CKV_AWS_173', comment: 'Env vars contain non-sensitive config (table name, bucket, region) — secrets use Secrets Manager' },
+      ],
     });
 
     // DynamoDB stream → Execution Lambda
@@ -575,6 +585,13 @@ export class SecurityTriageStack extends cdk.Stack {
       ],
     });
 
+    (this.api.deploymentStage.node.defaultChild as apigateway.CfnStage).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_73', comment: 'X-Ray tracing deferred to prod tier' },
+        { id: 'CKV_AWS_120', comment: 'API caching not required for dev tier' },
+      ],
+    });
+
     // Associate WAF with the API Gateway prod stage
     const wafAssociation = new wafv2.CfnWebACLAssociation(this, 'ApiWafAssociation', {
       resourceArn: `arn:aws:apigateway:${this.region}::/restapis/${this.api.restApiId}/stages/${this.api.deploymentStage.stageName}`,
@@ -590,17 +607,12 @@ export class SecurityTriageStack extends cdk.Stack {
     const ATO_MODEL_ID = 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
 
     // Log groups — pre-created so retention is CDK-managed, not Lambda-auto-created
-    const atoTriggerLogGroup = new logs.LogGroup(this, 'AtoTriggerLogs', {
-      logGroupName: '/aws/lambda/security-triage-ato-trigger',
-      retention: logs.RetentionDays.THREE_MONTHS,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
-
-    const atoWorkerLogGroup = new logs.LogGroup(this, 'AtoWorkerLogs', {
-      logGroupName: '/aws/lambda/security-triage-ato-worker',
-      retention: logs.RetentionDays.THREE_MONTHS,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
+    const atoTriggerLogGroup = createLogGroup(
+      this, 'AtoTriggerLogs', '/aws/lambda/security-triage-ato-trigger',
+    );
+    const atoWorkerLogGroup = createLogGroup(
+      this, 'AtoWorkerLogs', '/aws/lambda/security-triage-ato-worker',
+    );
 
     // AtoJobsTable — job lifecycle tracking (PENDING → IN_PROGRESS → COMPLETED/FAILED)
     const atoJobsTable = new dynamodb.Table(this, 'AtoJobsTable', {
@@ -616,6 +628,13 @@ export class SecurityTriageStack extends cdk.Stack {
         pointInTimeRecoveryEnabled: (process.env.DEPLOY_ENV ?? 'dev') === 'prod',
       },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    (atoJobsTable.node.defaultChild as dynamodb.CfnTable).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_119', comment: 'AWS managed encryption acceptable for dev tier' },
+        { id: 'CKV_AWS_28', comment: 'Point-in-time recovery enabled in prod; deferred for dev tier' },
+      ],
     });
 
     // GSI: list all jobs for a specific analyst, newest first
@@ -652,6 +671,13 @@ export class SecurityTriageStack extends cdk.Stack {
           allowedHeaders: ['*'],
           maxAge: 3000,
         },
+      ],
+    });
+
+    (atoReportsBucket.node.defaultChild as s3.CfnBucket).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_18', comment: 'Access logging not required for ATO reports bucket' },
+        { id: 'CKV_AWS_21', comment: 'Versioning not required for ATO reports; lifecycle expiration handles 7-year retention' },
       ],
     });
 
@@ -761,7 +787,7 @@ export class SecurityTriageStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(30),
       memorySize: 256,
       logGroup: atoTriggerLogGroup,
-      bundling: { minify: true, sourceMap: true, externalModules: [] },
+      bundling: STANDARD_BUNDLING,
       environment: {
         JOBS_TABLE_NAME:      atoJobsTable.tableName,
         JOBS_USERNAME_INDEX:  'username-index',
@@ -771,6 +797,15 @@ export class SecurityTriageStack extends cdk.Stack {
         USER_POOL_CLIENT_ID:  this.userPoolClient.userPoolClientId,
         ALLOWED_ORIGIN:       frontendUrl ?? '*',
       },
+    });
+
+    (atoTriggerLambda.node.defaultChild as lambda.CfnFunction).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_117', comment: 'Lambda VPC placement not required for dev tier' },
+        { id: 'CKV_AWS_116', comment: 'DLQ not required for dev tier' },
+        { id: 'CKV_AWS_115', comment: 'Reserved concurrency not required for dev tier' },
+        { id: 'CKV_AWS_173', comment: 'Secrets in Secrets Manager not env vars' },
+      ],
     });
 
     // ── Lambda: ATO Worker (background processor) ─────────────────────────────
@@ -786,13 +821,22 @@ export class SecurityTriageStack extends cdk.Stack {
       timeout: cdk.Duration.minutes(10),   // up to 18 NIST families × Bedrock latency
       memorySize: 1024,
       logGroup: atoWorkerLogGroup,
-      bundling: { minify: true, sourceMap: true, externalModules: [] },
+      bundling: STANDARD_BUNDLING,
       environment: {
         JOBS_TABLE_NAME:   atoJobsTable.tableName,
         REPORTS_BUCKET:    atoReportsBucket.bucketName,
         REGION:            this.region,
         BEDROCK_MODEL_ID:  ATO_MODEL_ID,
       },
+    });
+
+    (atoWorkerLambda.node.defaultChild as lambda.CfnFunction).addMetadata('checkov', {
+      skip: [
+        { id: 'CKV_AWS_117', comment: 'Lambda VPC placement not required for dev tier' },
+        { id: 'CKV_AWS_116', comment: 'DLQ not required for dev tier' },
+        { id: 'CKV_AWS_115', comment: 'Reserved concurrency not required for dev tier' },
+        { id: 'CKV_AWS_173', comment: 'Env vars contain non-sensitive config (table name, bucket, region, model ID) — no secrets' },
+      ],
     });
 
     // DynamoDB stream → ATO Worker (filter: INSERT only, one job at a time)
